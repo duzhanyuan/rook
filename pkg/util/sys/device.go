@@ -18,7 +18,6 @@ package sys
 import (
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -33,6 +32,7 @@ const (
 	SSDType  = "ssd"
 	PartType = "part"
 	sgdisk   = "sgdisk"
+	mountCmd = "mount"
 )
 
 type Partition struct {
@@ -41,12 +41,9 @@ type Partition struct {
 	Label string
 }
 
-// request the current user once and stash it in this global variable
-var currentUser *user.User
-
 func ListDevices(executor exec.Executor) ([]string, error) {
 	cmd := "lsblk all"
-	devices, err := executor.ExecuteCommandWithOutput(cmd, "lsblk", "--all", "--noheadings", "--list", "--output", "KNAME")
+	devices, err := executor.ExecuteCommandWithOutput(false, cmd, "lsblk", "--all", "--noheadings", "--list", "--output", "KNAME")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list all devices: %+v", err)
 	}
@@ -56,8 +53,8 @@ func ListDevices(executor exec.Executor) ([]string, error) {
 
 func GetDevicePartitions(device string, executor exec.Executor) (partitions []*Partition, unusedSpace uint64, err error) {
 	cmd := fmt.Sprintf("lsblk /dev/%s", device)
-	output, err := executor.ExecuteCommandWithOutput(cmd, "lsblk", fmt.Sprintf("/dev/%s", device),
-		"--bytes", "--pairs", "--output", "NAME,SIZE,TYPE,PKNAME,PARTLABEL")
+	output, err := executor.ExecuteCommandWithOutput(false, cmd, "lsblk", fmt.Sprintf("/dev/%s", device),
+		"--bytes", "--pairs", "--output", "NAME,SIZE,TYPE,PKNAME")
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get device %s partitions. %+v", device, err)
 	}
@@ -77,12 +74,18 @@ func GetDevicePartitions(device string, executor exec.Executor) (partitions []*P
 		} else if props["PKNAME"] == device && props["TYPE"] == PartType {
 			// found a partition
 			p := &Partition{Name: name}
-			p.Label = props["PARTLABEL"]
 			p.Size, err = strconv.ParseUint(props["SIZE"], 10, 64)
 			if err != nil {
 				return nil, 0, fmt.Errorf("failed to get partition %s size. %+v", name, err)
 			}
 			totalPartitionSize += p.Size
+
+			label, err := GetPartitionLabel(name, executor)
+			if err != nil {
+				return nil, 0, err
+			}
+			p.Label = label
+
 			partitions = append(partitions, p)
 		}
 	}
@@ -94,8 +97,12 @@ func GetDevicePartitions(device string, executor exec.Executor) (partitions []*P
 }
 
 func GetDeviceProperties(device string, executor exec.Executor) (map[string]string, error) {
-	cmd := fmt.Sprintf("lsblk /dev/%s", device)
-	output, err := executor.ExecuteCommandWithOutput(cmd, "lsblk", fmt.Sprintf("/dev/%s", device),
+	return GetDevicePropertiesFromPath(fmt.Sprintf("/dev/%s", device), executor)
+}
+
+func GetDevicePropertiesFromPath(devicePath string, executor exec.Executor) (map[string]string, error) {
+	cmd := fmt.Sprintf("lsblk %s", devicePath)
+	output, err := executor.ExecuteCommandWithOutput(false, cmd, "lsblk", devicePath,
 		"--bytes", "--nodeps", "--pairs", "--output", "SIZE,ROTA,RO,TYPE,PKNAME")
 	if err != nil {
 		// try to get more information about the command error
@@ -115,7 +122,7 @@ func GetDeviceProperties(device string, executor exec.Executor) (map[string]stri
 // get the file systems availab
 func GetDeviceFilesystems(device string, executor exec.Executor) (string, error) {
 	cmd := fmt.Sprintf("get filesystem type for %s", device)
-	output, err := executor.ExecuteCommandWithOutput(cmd, "df", "--output=source,fstype")
+	output, err := executor.ExecuteCommandWithOutput(false, cmd, "df", "--output=source,fstype")
 	if err != nil {
 		return "", fmt.Errorf("command %s failed: %+v", cmd, err)
 	}
@@ -125,13 +132,13 @@ func GetDeviceFilesystems(device string, executor exec.Executor) (string, error)
 
 func RemovePartitions(device string, executor exec.Executor) error {
 	cmd := fmt.Sprintf("zap %s", device)
-	err := executor.ExecuteCommand(cmd, sgdisk, "--zap-all", "/dev/"+device)
+	err := executor.ExecuteCommand(false, cmd, sgdisk, "--zap-all", "/dev/"+device)
 	if err != nil {
 		return fmt.Errorf("failed to zap partitions on /dev/%s: %+v", device, err)
 	}
 
 	cmd = fmt.Sprintf("clear %s", device)
-	err = executor.ExecuteCommand(cmd, sgdisk, "--clear", "--mbrtogpt", "/dev/"+device)
+	err = executor.ExecuteCommand(false, cmd, sgdisk, "--clear", "--mbrtogpt", "/dev/"+device)
 	if err != nil {
 		return fmt.Errorf("failed to clear partitions on /dev/%s: %+v", device, err)
 	}
@@ -141,12 +148,12 @@ func RemovePartitions(device string, executor exec.Executor) error {
 
 func CreatePartitions(device string, args []string, executor exec.Executor) error {
 	cmd := fmt.Sprintf("partition %s", device)
-	return executor.ExecuteCommand(cmd, sgdisk, args...)
+	return executor.ExecuteCommand(false, cmd, sgdisk, args...)
 }
 
 func FormatDevice(devicePath string, executor exec.Executor) error {
 	cmd := fmt.Sprintf("mkfs.ext4 %s", devicePath)
-	if err := executor.ExecuteCommand(cmd, "sudo", "mkfs.ext4", devicePath); err != nil {
+	if err := executor.ExecuteCommand(false, cmd, "mkfs.ext4", devicePath); err != nil {
 		return fmt.Errorf("command %s failed: %+v", cmd, err)
 	}
 
@@ -156,7 +163,7 @@ func FormatDevice(devicePath string, executor exec.Executor) error {
 // look up the UUID for a disk.
 func GetDiskUUID(device string, executor exec.Executor) (string, error) {
 	cmd := fmt.Sprintf("get disk %s uuid", device)
-	output, err := executor.ExecuteCommandWithOutput(cmd,
+	output, err := executor.ExecuteCommandWithOutput(false, cmd,
 		sgdisk, "--print", fmt.Sprintf("/dev/%s", device))
 	if err != nil {
 		return "", err
@@ -165,29 +172,42 @@ func GetDiskUUID(device string, executor exec.Executor) (string, error) {
 	return parseUUID(device, output)
 }
 
+func GetPartitionLabel(deviceName string, executor exec.Executor) (string, error) {
+	// look up the partition's label with blkid because lsblk relies on udev which is
+	// not available in containers
+	devicePath := fmt.Sprintf("/dev/%s", deviceName)
+	cmd := fmt.Sprintf("blkid %s", devicePath)
+	output, err := executor.ExecuteCommandWithOutput(false, cmd, "blkid", devicePath, "-s", "PARTLABEL", "-o", "value")
+	if err != nil {
+		return "", fmt.Errorf("failed to get partition label for device %s: %+v", deviceName, err)
+	}
+
+	return output, nil
+}
+
 // look up the mount point of the given device.  empty string returned if device is not mounted.
 func GetDeviceMountPoint(deviceName string, executor exec.Executor) (string, error) {
 	cmd := fmt.Sprintf("get mount point for %s", deviceName)
-	mountPoint, err := executor.ExecuteCommandPipeline(
-		cmd,
-		fmt.Sprintf(`mount | grep '^/dev/%s on' | awk '{print $3}'`, deviceName))
+	output, err := executor.ExecuteCommandWithOutput(false, cmd, mountCmd)
 	if err != nil {
 		return "", fmt.Errorf("command %s failed: %+v", cmd, err)
 	}
 
+	searchFor := fmt.Sprintf("^/dev/%s on", deviceName)
+	mountPoint := Awk(Grep(output, searchFor), 3)
 	return mountPoint, nil
 }
 
 func GetDeviceFromMountPoint(mountPoint string, executor exec.Executor) (string, error) {
 	mountPoint = filepath.Clean(mountPoint)
 	cmd := fmt.Sprintf("get device from mount point %s", mountPoint)
-	device, err := executor.ExecuteCommandPipeline(
-		cmd,
-		fmt.Sprintf(`mount | grep 'on %s ' | awk '{print $1}'`, mountPoint))
+	output, err := executor.ExecuteCommandWithOutput(false, cmd, mountCmd)
 	if err != nil {
 		return "", fmt.Errorf("command %s failed: %+v", cmd, err)
 	}
 
+	searchFor := fmt.Sprintf("on %s ", mountPoint)
+	device := Awk(Grep(output, searchFor), 1)
 	return device, nil
 }
 
@@ -197,7 +217,7 @@ func MountDevice(devicePath, mountPath string, executor exec.Executor) error {
 
 // comma-separated list of mount options passed directly to mount command
 func MountDeviceWithOptions(devicePath, mountPath, fstype, options string, executor exec.Executor) error {
-	args := []string{"mount"}
+	args := []string{}
 
 	if fstype != "" {
 		args = append(args, "-t", fstype)
@@ -212,7 +232,7 @@ func MountDeviceWithOptions(devicePath, mountPath, fstype, options string, execu
 
 	os.MkdirAll(mountPath, 0755)
 	cmd := fmt.Sprintf("mount %s", devicePath)
-	if err := executor.ExecuteCommand(cmd, "sudo", args...); err != nil {
+	if err := executor.ExecuteCommand(false, cmd, mountCmd, args...); err != nil {
 		return fmt.Errorf("command %s failed: %+v", cmd, err)
 	}
 
@@ -221,7 +241,7 @@ func MountDeviceWithOptions(devicePath, mountPath, fstype, options string, execu
 
 func UnmountDevice(devicePath string, executor exec.Executor) error {
 	cmd := fmt.Sprintf("umount %s", devicePath)
-	if err := executor.ExecuteCommand(cmd, "sudo", "umount", devicePath); err != nil {
+	if err := executor.ExecuteCommand(false, cmd, "umount", devicePath); err != nil {
 		cmdErr, ok := err.(*exec.CommandError)
 		if ok && cmdErr.ExitStatus() == 32 {
 			logger.Infof("ignoring exit status 32 from unmount of device %s, err:%+v", devicePath, cmdErr)
@@ -235,33 +255,15 @@ func UnmountDevice(devicePath string, executor exec.Executor) error {
 
 func DoesDeviceHaveChildren(device string, executor exec.Executor) (bool, error) {
 	cmd := fmt.Sprintf("check children for device %s", device)
-	children, err := executor.ExecuteCommandPipeline(
-		cmd,
-		fmt.Sprintf(`lsblk --all -n -l --output PKNAME | grep "^%s$" | awk '{print $0}'`, device))
+	output, err := executor.ExecuteCommandWithOutput(false, cmd, "lsblk --all -n -l --output PKNAME")
 	if err != nil {
 		return false, fmt.Errorf("command %s failed: %+v", cmd, err)
 	}
 
+	searchFor := fmt.Sprintf("^%s$", device)
+	children := Grep(output, searchFor)
+
 	return children != "", nil
-}
-
-func ChownForCurrentUser(path string, executor exec.Executor) {
-	if currentUser == nil {
-		var err error
-		currentUser, err = user.Current()
-		if err != nil {
-			logger.Warningf("unable to find current user: %+v", err)
-			return
-		}
-	}
-
-	if currentUser != nil {
-		cmd := fmt.Sprintf("chown %s", path)
-		if err := executor.ExecuteCommand(cmd, "sudo", "chown", "-R",
-			fmt.Sprintf("%s:%s", currentUser.Username, currentUser.Username), path); err != nil {
-			logger.Warningf("command %s failed: %+v", cmd, err)
-		}
-	}
 }
 
 // finds the file system(s) for the device in the output of 'df'

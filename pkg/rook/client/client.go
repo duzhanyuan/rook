@@ -35,21 +35,27 @@ type RookRestClient interface {
 	GetNodes() ([]model.Node, error)
 	GetPools() ([]model.Pool, error)
 	CreatePool(pool model.Pool) (string, error)
+	DeletePool(name string) error
 	GetBlockImages() ([]model.BlockImage, error)
 	CreateBlockImage(image model.BlockImage) (string, error)
+	DeleteBlockImage(image model.BlockImage) (string, error)
 	GetClientAccessInfo() (model.ClientAccessInfo, error)
 	GetFilesystems() ([]model.Filesystem, error)
 	CreateFilesystem(model.FilesystemRequest) (string, error)
 	DeleteFilesystem(model.FilesystemRequest) (string, error)
 	GetStatusDetails() (model.StatusDetails, error)
-	CreateObjectStore() (string, error)
-	GetObjectStoreConnectionInfo() (*model.ObjectStoreConnectInfo, error)
-	ListBuckets() ([]model.ObjectBucket, error)
-	ListObjectUsers() ([]model.ObjectUser, error)
-	GetObjectUser(string) (*model.ObjectUser, error)
-	CreateObjectUser(model.ObjectUser) (*model.ObjectUser, error)
-	UpdateObjectUser(model.ObjectUser) (*model.ObjectUser, error)
-	DeleteObjectUser(string) error
+	GetObjectStores() ([]model.ObjectStoreResponse, error)
+	CreateObjectStore(store model.ObjectStore) (string, error)
+	DeleteObjectStore(storeName string) error
+	GetObjectStoreConnectionInfo(storeName string) (*model.ObjectStoreConnectInfo, error)
+	ListBuckets(storeName string) ([]model.ObjectBucket, error)
+	GetBucket(storeName, bucketName string) (*model.ObjectBucket, error)
+	DeleteBucket(storeName, bucketName string, purge bool) error
+	ListObjectUsers(storeName string) ([]model.ObjectUser, error)
+	GetObjectUser(storeName, id string) (*model.ObjectUser, error)
+	CreateObjectUser(storeName string, user model.ObjectUser) (*model.ObjectUser, error)
+	UpdateObjectUser(storeName string, user model.ObjectUser) (*model.ObjectUser, error)
+	DeleteObjectUser(storeName, id string) error
 }
 
 type RookNetworkRestClient struct {

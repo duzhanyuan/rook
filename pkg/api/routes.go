@@ -15,6 +15,12 @@ limitations under the License.
 */
 package api
 
+import (
+	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
 func (h *Handler) GetRoutes() []Route {
 	return []Route{
 		{
@@ -42,6 +48,12 @@ func (h *Handler) GetRoutes() []Route {
 			h.CreatePool,
 		},
 		{
+			"DeletePool",
+			"DELETE",
+			"/pool/{name}",
+			h.DeletePool,
+		},
+		{
 			"GetImages",
 			"GET",
 			"/image",
@@ -54,22 +66,22 @@ func (h *Handler) GetRoutes() []Route {
 			h.CreateImage,
 		},
 		{
+			"DeleteImage",
+			"DELETE",
+			"/image",
+			h.DeleteImage,
+		},
+		{
 			"GetClientAccessInfo",
 			"GET",
 			"/client",
 			h.GetClientAccessInfo,
 		},
 		{
-			"GetMonitors",
+			"GetObjectStores",
 			"GET",
-			"/mon",
-			h.GetMonitors,
-		},
-		{
-			"GetCrushMap",
-			"GET",
-			"/crushmap",
-			h.GetCrushMap,
+			"/objectstore",
+			h.GetObjectStores,
 		},
 		{
 			"CreateObjectStore",
@@ -79,51 +91,63 @@ func (h *Handler) GetRoutes() []Route {
 		},
 		{
 			"RemoveObjectStore",
-			"POST",
-			"/objectstore/remove",
+			"DELETE",
+			"/objectstore/{name}",
 			h.RemoveObjectStore,
 		},
 		{
 			"GetObjectStoreConnectionInfo",
 			"GET",
-			"/objectstore/connectioninfo",
+			"/objectstore/{name}/connectioninfo",
 			h.GetObjectStoreConnectionInfo,
 		},
 		{
 			"ListUsers",
 			"GET",
-			"/objectstore/users",
+			"/objectstore/{name}/users",
 			h.ListUsers,
 		},
 		{
 			"GetUser",
 			"GET",
-			"/objectstore/users/{id}",
+			"/objectstore/{name}/users/{id}",
 			h.GetUser,
 		},
 		{
 			"CreateUser",
 			"POST",
-			"/objectstore/users",
+			"/objectstore/{name}/users",
 			h.CreateUser,
 		},
 		{
 			"UpdateUser",
 			"PUT",
-			"/objectstore/users/{id}",
+			"/objectstore/{name}/users/{id}",
 			h.UpdateUser,
 		},
 		{
 			"DeleteUser",
 			"DELETE",
-			"/objectstore/users/{id}",
+			"/objectstore/{name}/users/{id}",
 			h.DeleteUser,
 		},
 		{
 			"ListBuckets",
 			"GET",
-			"/objectstore/buckets",
-			h.Listbuckets,
+			"/objectstore/{name}/buckets",
+			h.ListBuckets,
+		},
+		{
+			"GetBucket",
+			"GET",
+			"/objectstore/{name}/buckets/{bucketName}",
+			h.GetBucket,
+		},
+		{
+			"DeleteBucket",
+			"DELETE",
+			"/objectstore/{name}/buckets/{bucketName}",
+			h.DeleteBucket,
 		},
 		{
 			"GetFileSystems",
@@ -139,8 +163,8 @@ func (h *Handler) GetRoutes() []Route {
 		},
 		{
 			"RemoveFileSystem",
-			"POST",
-			"/filesystem/remove",
+			"DELETE",
+			"/filesystem",
 			h.RemoveFileSystem,
 		},
 		{
@@ -148,6 +172,12 @@ func (h *Handler) GetRoutes() []Route {
 			"POST",
 			"/log",
 			h.SetLogLevel,
+		},
+		{
+			"GetMetrics",
+			"GET",
+			"/metrics",
+			promhttp.Handler().(http.HandlerFunc),
 		},
 	}
 }

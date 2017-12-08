@@ -13,57 +13,105 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
+// Package api for the operator api manager.
 package api
 
 import (
 	"fmt"
+	"net/http"
+	"time"
 
-	"github.com/rook/rook/pkg/cephmgr/mon"
+	"github.com/coreos/pkg/capnslog"
+	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/model"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	k8smon "github.com/rook/rook/pkg/operator/mon"
-	"k8s.io/client-go/1.5/kubernetes"
-	"k8s.io/client-go/1.5/pkg/api/v1"
-	extensions "k8s.io/client-go/1.5/pkg/apis/extensions/v1beta1"
-	"k8s.io/client-go/1.5/pkg/util/intstr"
+	opmon "github.com/rook/rook/pkg/operator/mon"
+	rookclient "github.com/rook/rook/pkg/rook/client"
+	"k8s.io/api/core/v1"
+	extensions "k8s.io/api/extensions/v1beta1"
+	"k8s.io/api/rbac/v1beta1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
 )
+
+var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-api")
 
 const (
 	deploymentName = "rook-api"
+	clientTimeout  = 15 * time.Second
 )
 
-type Cluster struct {
-	Namespace string
-	Version   string
-	Replicas  int32
+var clusterAccessRules = []v1beta1.PolicyRule{
+	{
+		APIGroups: []string{""},
+		Resources: []string{"namespaces", "secrets", "pods", "services", "nodes", "configmaps", "events"},
+		Verbs:     []string{"get", "list", "watch", "create", "update"},
+	},
+	{
+		APIGroups: []string{"extensions"},
+		Resources: []string{"thirdpartyresources", "deployments", "daemonsets", "replicasets"},
+		Verbs:     []string{"get", "list", "create", "delete"},
+	},
+	{
+		APIGroups: []string{"apiextensions.k8s.io"},
+		Resources: []string{"customresourcedefinitions"},
+		Verbs:     []string{"get", "list", "create"},
+	},
+	{
+		APIGroups: []string{"storage.k8s.io"},
+		Resources: []string{"storageclasses"},
+		Verbs:     []string{"get", "list"},
+	},
 }
 
-func New(namespace, version string) *Cluster {
+// Cluster has the api service properties
+type Cluster struct {
+	context     *clusterd.Context
+	Namespace   string
+	placement   k8sutil.Placement
+	Version     string
+	Replicas    int32
+	HostNetwork bool
+	resources   v1.ResourceRequirements
+}
+
+// New creates an instance
+func New(context *clusterd.Context, namespace, version string, placement k8sutil.Placement, hostNetwork bool, resources v1.ResourceRequirements) *Cluster {
 	return &Cluster{
-		Namespace: namespace,
-		Version:   version,
-		Replicas:  1,
+		context:     context,
+		Namespace:   namespace,
+		placement:   placement,
+		Version:     version,
+		Replicas:    1,
+		HostNetwork: hostNetwork,
+		resources:   resources,
 	}
 }
 
-func (c *Cluster) Start(clientset *kubernetes.Clientset, cluster *mon.ClusterInfo) error {
+// Start the api service
+func (c *Cluster) Start() error {
 	logger.Infof("starting the Rook api")
 
-	if cluster == nil || len(cluster.Monitors) == 0 {
-		return fmt.Errorf("missing mons to start")
-	}
-
 	// start the service
-	err := c.startService(clientset, cluster)
+	err := c.startService()
 	if err != nil {
 		return fmt.Errorf("failed to start api service. %+v", err)
 	}
 
-	// start the deployment
-	deployment, err := c.makeDeployment(cluster)
-	_, err = clientset.Deployments(c.Namespace).Create(deployment)
+	// create the artifacts for the api service to work with RBAC enabled
+	err = c.makeRole()
 	if err != nil {
-		if !k8sutil.IsKubernetesResourceAlreadyExistError(err) {
+		logger.Warningf("failed to init RBAC for the api service. %+v", err)
+	}
+
+	// start the deployment
+	deployment := c.makeDeployment()
+	_, err = c.context.Clientset.ExtensionsV1beta1().Deployments(c.Namespace).Create(deployment)
+	if err != nil {
+		if !errors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create api deployment. %+v", err)
 		}
 		logger.Infof("api deployment already exists")
@@ -74,62 +122,78 @@ func (c *Cluster) Start(clientset *kubernetes.Clientset, cluster *mon.ClusterInf
 	return nil
 }
 
-func (c *Cluster) makeDeployment(cluster *mon.ClusterInfo) (*extensions.Deployment, error) {
+// make a cluster role
+func (c *Cluster) makeRole() error {
+	return k8sutil.MakeRole(c.context.Clientset, c.Namespace, deploymentName, clusterAccessRules)
+}
+
+func (c *Cluster) makeDeployment() *extensions.Deployment {
 	deployment := &extensions.Deployment{}
 	deployment.Name = deploymentName
 	deployment.Namespace = c.Namespace
 
-	podSpec := v1.PodTemplateSpec{
-		ObjectMeta: v1.ObjectMeta{
+	podSpec := v1.PodSpec{
+		ServiceAccountName: deploymentName,
+		Containers:         []v1.Container{c.apiContainer()},
+		RestartPolicy:      v1.RestartPolicyAlways,
+		Volumes: []v1.Volume{
+			{Name: k8sutil.DataDirVolume, VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}},
+		},
+		HostNetwork: c.HostNetwork,
+	}
+	if c.HostNetwork {
+		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
+	}
+	c.placement.ApplyToPodSpec(&podSpec)
+
+	podTemplateSpec := v1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:        deploymentName,
-			Labels:      getLabels(cluster.Name),
+			Labels:      c.getLabels(),
 			Annotations: map[string]string{},
 		},
-		Spec: v1.PodSpec{
-			Containers:    []v1.Container{c.apiContainer(cluster)},
-			RestartPolicy: v1.RestartPolicyAlways,
-			Volumes: []v1.Volume{
-				{Name: k8sutil.DataDirVolume, VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}},
-			},
-		},
+		Spec: podSpec,
 	}
 
-	deployment.Spec = extensions.DeploymentSpec{Template: podSpec, Replicas: &c.Replicas}
+	deployment.Spec = extensions.DeploymentSpec{Template: podTemplateSpec, Replicas: &c.Replicas}
 
-	return deployment, nil
+	return deployment
 }
 
-func (c *Cluster) apiContainer(cluster *mon.ClusterInfo) v1.Container {
-	// need a different prefix on the env vars
-	monSecretVar := k8smon.MonSecretEnvVar()
-	adminSecretVar := k8smon.AdminSecretEnvVar()
-	monSecretVar.Name = "ROOK_OPERATOR_MON_SECRET"
-	adminSecretVar.Name = "ROOK_OPERATOR_ADMIN_SECRET"
+func (c *Cluster) apiContainer() v1.Container {
 
-	command := fmt.Sprintf("/usr/bin/rook-operator api --data-dir=%s --mon-endpoints=%s --cluster-name=%s --api-port=%d --container-version=%s",
-		k8sutil.DataDir, mon.FlattenMonEndpoints(cluster.Monitors), cluster.Name, model.Port, c.Version)
 	return v1.Container{
-		// TODO: fix "sleep 5".
-		// Without waiting some time, there is highly probable flakes in network setup.
-		Command: []string{"/bin/sh", "-c", fmt.Sprintf("sleep 5; %s", command)},
-		Name:    deploymentName,
-		Image:   fmt.Sprintf("quay.io/rook/rook-operator:%v", c.Version),
+		Args: []string{
+			"api",
+			fmt.Sprintf("--config-dir=%s", k8sutil.DataDir),
+			fmt.Sprintf("--port=%d", model.Port),
+			fmt.Sprintf("--hostnetwork=%t", c.HostNetwork),
+		},
+		Name:  deploymentName,
+		Image: k8sutil.MakeRookImage(c.Version),
 		VolumeMounts: []v1.VolumeMount{
 			{Name: k8sutil.DataDirVolume, MountPath: k8sutil.DataDir},
 		},
 		Env: []v1.EnvVar{
-			monSecretVar,
-			adminSecretVar,
+			{Name: "ROOK_VERSION_TAG", Value: c.Version},
+			{Name: "ROOK_NAMESPACE", ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
+			k8sutil.RepoPrefixEnvVar(),
+			opmon.SecretEnvVar(),
+			opmon.AdminSecretEnvVar(),
+			opmon.EndpointEnvVar(),
+			opmon.ClusterNameEnvVar(c.Namespace),
 		},
+		Resources: c.resources,
 	}
 }
 
-func (c *Cluster) startService(clientset *kubernetes.Clientset, clusterInfo *mon.ClusterInfo) error {
-	labels := getLabels(clusterInfo.Name)
+func (c *Cluster) startService() error {
+	labels := c.getLabels()
 	s := &v1.Service{
-		ObjectMeta: v1.ObjectMeta{
-			Name:   deploymentName,
-			Labels: labels,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deploymentName,
+			Namespace: c.Namespace,
+			Labels:    labels,
 		},
 		Spec: v1.ServiceSpec{
 			Ports: []v1.ServicePort{
@@ -144,20 +208,44 @@ func (c *Cluster) startService(clientset *kubernetes.Clientset, clusterInfo *mon
 		},
 	}
 
-	s, err := clientset.Services(k8sutil.Namespace).Create(s)
+	if c.HostNetwork {
+		s.Spec.ClusterIP = v1.ClusterIPNone
+	}
+
+	s, err := c.context.Clientset.CoreV1().Services(c.Namespace).Create(s)
 	if err != nil {
-		if !k8sutil.IsKubernetesResourceAlreadyExistError(err) {
+		if !errors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create api service. %+v", err)
 		}
+		logger.Infof("api service already running")
+		return nil
 	}
 
 	logger.Infof("API service running at %s:%d", s.Spec.ClusterIP, model.Port)
 	return nil
 }
 
-func getLabels(clusterName string) map[string]string {
+func (c *Cluster) getLabels() map[string]string {
 	return map[string]string{
 		k8sutil.AppAttr:     deploymentName,
-		k8sutil.ClusterAttr: clusterName,
+		k8sutil.ClusterAttr: c.Namespace,
 	}
+}
+
+// GetRookClient gets a reference of the rook client connected to the Rook-API on the given namespace
+func GetRookClient(namespace string, client kubernetes.Interface) (rookclient.RookRestClient, error) {
+
+	// Look up the api service for the given namespace
+	logger.Infof("retrieving rook api endpoint for namespace %s", namespace)
+	svc, err := client.CoreV1().Services(namespace).Get(deploymentName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to find the api service. %+v", err)
+	}
+
+	httpClient := http.DefaultClient
+	httpClient.Timeout = clientTimeout
+	endpoint := fmt.Sprintf("%s:%d", svc.Spec.ClusterIP, svc.Spec.Ports[0].Port)
+	rclient := rookclient.NewRookNetworkRestClient(rookclient.GetRestURL(endpoint), httpClient)
+	logger.Infof("rook api endpoint %s for namespace %s", endpoint, namespace)
+	return rclient, nil
 }

@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"net/http"
 
-	ceph "github.com/rook/rook/pkg/cephmgr/client"
+	ceph "github.com/rook/rook/pkg/ceph/client"
 	"github.com/rook/rook/pkg/model"
 )
 
@@ -28,14 +28,8 @@ import (
 // GET
 // /image
 func (h *Handler) GetImages(w http.ResponseWriter, r *http.Request) {
-	adminConn, ok := h.handleConnectToCeph(w)
-	if !ok {
-		return
-	}
-	defer adminConn.Shutdown()
-
 	// first list all the pools so that we can retrieve images from all pools
-	pools, err := ceph.ListPoolSummaries(adminConn)
+	pools, err := ceph.ListPoolSummaries(h.context, h.config.clusterInfo.Name)
 	if err != nil {
 		logger.Errorf("failed to list pools: %+v", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -44,46 +38,38 @@ func (h *Handler) GetImages(w http.ResponseWriter, r *http.Request) {
 
 	result := []model.BlockImage{}
 
-	// for each pool, open an IO context to get further details about all the images in the pool
+	// for each pool, get further details about all the images in the pool
 	for _, p := range pools {
-		ioctx, ok := handleOpenIOContext(w, adminConn, p.Name)
+		images, ok := h.getImagesForPool(w, p.Name)
 		if !ok {
 			return
-		}
-
-		// get all the image names for the current pool
-		imageNames, err := ioctx.GetImageNames()
-		if err != nil {
-			logger.Errorf("failed to get image names from pool %s: %+v", p.Name, err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		// for each image name, open the image and stat it for further details
-		images := make([]model.BlockImage, len(imageNames))
-		for i, name := range imageNames {
-			image := ioctx.GetImage(name)
-			image.Open(true)
-			defer image.Close()
-			imageStat, err := image.Stat()
-			if err != nil {
-				logger.Errorf("failed to stat image %s from pool %s: %+v", name, p.Name, err)
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-
-			// add the current image's details to the result set
-			images[i] = model.BlockImage{
-				Name:     name,
-				PoolName: p.Name,
-				Size:     imageStat.Size,
-			}
 		}
 
 		result = append(result, images...)
 	}
 
 	FormatJsonResponse(w, result)
+}
+
+func (h *Handler) getImagesForPool(w http.ResponseWriter, poolName string) ([]model.BlockImage, bool) {
+	cephImages, err := ceph.ListImages(h.context, h.config.clusterInfo.Name, poolName)
+	if err != nil {
+		logger.Errorf("failed to get images from pool %s: %+v", poolName, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return nil, false
+	}
+
+	images := make([]model.BlockImage, len(cephImages))
+	for i, image := range cephImages {
+		// add the current image's details to the result set
+		images[i] = model.BlockImage{
+			Name:     image.Name,
+			PoolName: poolName,
+			Size:     image.Size,
+		}
+	}
+
+	return images, true
 }
 
 // Creates a new image in this cluster.
@@ -108,23 +94,41 @@ func (h *Handler) CreateImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	adminConn, ok := h.handleConnectToCeph(w)
-	if !ok {
-		return
-	}
-	defer adminConn.Shutdown()
-
-	ioctx, ok := handleOpenIOContext(w, adminConn, newImage.PoolName)
-	if !ok {
-		return
-	}
-
-	createdImage, err := ioctx.CreateImage(newImage.Name, newImage.Size, 22)
+	createdImage, err := ceph.CreateImage(h.context, h.config.clusterInfo.Name, newImage.Name,
+		newImage.PoolName, newImage.Size)
 	if err != nil {
 		logger.Errorf("failed to create image %+v: %+v", newImage, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	w.Write([]byte(fmt.Sprintf("succeeded created image %s", createdImage.Name())))
+	w.Write([]byte(fmt.Sprintf("succeeded created image %s", createdImage.Name)))
+}
+
+// Deletes a block image from this cluster.
+// DELETE
+// /image?name=<imageName>&pool=<imagePool>
+func (h *Handler) DeleteImage(w http.ResponseWriter, r *http.Request) {
+	imageName := r.URL.Query().Get("name")
+	imagePool := r.URL.Query().Get("pool")
+
+	deleteImageReq := model.BlockImage{
+		Name:     imageName,
+		PoolName: imagePool,
+	}
+
+	if deleteImageReq.Name == "" || deleteImageReq.PoolName == "" {
+		logger.Errorf("image missing required fields: %+v", deleteImageReq)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err := ceph.DeleteImage(h.context, h.config.clusterInfo.Name, deleteImageReq.Name, deleteImageReq.PoolName)
+	if err != nil {
+		logger.Errorf("failed to delete image %+v: %+v", deleteImageReq, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Write([]byte(fmt.Sprintf("succeeded deleting image %s", deleteImageReq.Name)))
 }

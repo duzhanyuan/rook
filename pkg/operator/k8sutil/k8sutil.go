@@ -16,39 +16,57 @@ limitations under the License.
 Some of the code below came from https://github.com/coreos/etcd-operator
 which also has the apache 2.0 license.
 */
+
+// Package k8sutil for Kubernetes helpers.
 package k8sutil
 
 import (
-	"net/http"
+	"fmt"
 
-	apierrors "k8s.io/client-go/1.5/pkg/api/errors"
-	"k8s.io/client-go/1.5/pkg/api/unversioned"
+	"github.com/coreos/pkg/capnslog"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/pkg/util/version"
+)
+
+var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-k8sutil")
+
+const (
+	// V1Alpha1 version for kubernetes resources
+	V1Alpha1 = "v1alpha1"
+
+	// V1Beta1 version for kubernetes resources
+	V1Beta1 = "v1beta1"
+
+	// V1 version for kubernetes resources
+	V1 = "v1"
 )
 
 const (
-	Namespace     = "rook"
+	// Namespace for rook
+	Namespace = "rook"
+	// CustomResourceGroup for rook CRD
+	CustomResourceGroup = "rook.io"
+	// DefaultNamespace for the cluster
+	DefaultNamespace = "default"
+	// DataDirVolume data dir volume
 	DataDirVolume = "rook-data"
-	DataDir       = "/var/lib/rook"
+	// DataDir folder
+	DataDir = "/var/lib/rook"
+	// RookType for the CRD
+	RookType = "kubernetes.io/rook"
+	// PodNameEnvVar is the env variable for getting the pod name via downward api
+	PodNameEnvVar = "POD_NAME"
+	// PodNamespaceEnvVar is the env variable for getting the pod namespace via downward api
+	PodNamespaceEnvVar = "POD_NAMESPACE"
+	// NodeNameEnvVar is the env variable for getting the node via downward api
+	NodeNameEnvVar = "NODE_NAME"
 )
 
-func IsKubernetesResourceAlreadyExistError(err error) bool {
-	se, ok := err.(*apierrors.StatusError)
-	if !ok {
-		return false
+// GetK8SVersion gets the version of the running K8S cluster
+func GetK8SVersion(clientset kubernetes.Interface) (*version.Version, error) {
+	serverVersion, err := clientset.Discovery().ServerVersion()
+	if err != nil {
+		return nil, fmt.Errorf("Error getting server version: %v", err)
 	}
-	if se.Status().Code == http.StatusConflict && se.Status().Reason == unversioned.StatusReasonAlreadyExists {
-		return true
-	}
-	return false
-}
-
-func IsKubernetesResourceNotFoundError(err error) bool {
-	se, ok := err.(*apierrors.StatusError)
-	if !ok {
-		return false
-	}
-	if se.Status().Code == http.StatusNotFound && se.Status().Reason == unversioned.StatusReasonNotFound {
-		return true
-	}
-	return false
+	return version.MustParseSemantic(serverVersion.GitVersion), nil
 }

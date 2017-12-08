@@ -1,21 +1,8 @@
-.vscode/
-
-/.glide
+/.vscode/
 /.work
-/.external
+/.cache
+/.idea
 
-/bin
-/tools
-/vendor
-/release
-
-coverage.out
-coverage.html
-debug.test
-
-.vagrant/
-demo/vagrant/cloud-config.yml
-
-.virtualbox/
-
-.discovery-token
+/_output
+/vendor/
+/vendor.orig/

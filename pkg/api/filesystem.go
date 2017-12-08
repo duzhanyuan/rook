@@ -19,24 +19,19 @@ import (
 	"encoding/json"
 	"net/http"
 
-	ceph "github.com/rook/rook/pkg/cephmgr/client"
-	"github.com/rook/rook/pkg/cephmgr/mds"
+	ceph "github.com/rook/rook/pkg/ceph/client"
 	"github.com/rook/rook/pkg/model"
+	k8smds "github.com/rook/rook/pkg/operator/mds"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Gets a listing of file systems in this cluster.
 // GET
 // /filesystem
 func (h *Handler) GetFileSystems(w http.ResponseWriter, r *http.Request) {
-	adminConn, ok := h.handleConnectToCeph(w)
-	if !ok {
-		return
-	}
-	defer adminConn.Shutdown()
-
-	filesystems, err := ceph.ListFilesystems(adminConn)
+	filesystems, err := ceph.ListFilesystems(h.context, h.config.namespace)
 	if err != nil {
-		logger.Errorf("failed to list pools: %+v", err)
+		logger.Errorf("failed to list file systems: %+v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -62,21 +57,8 @@ func (h *Handler) CreateFileSystem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clusterInfo, err := h.config.GetClusterInfo()
-	if err != nil {
-		logger.Errorf("failed to get cluster info: %+v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	f := mds.NewFS(h.context, h.config.CephFactory, fs.Name, fs.PoolName)
-	if err := f.CreateFilesystem(clusterInfo); err != nil {
-		logger.Errorf("failed to create file system %s: %+v", fs.Name, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	if err := h.config.ClusterHandler.StartFileSystem(fs); err != nil {
+	logger.Infof("Starting the MDS")
+	if err := k8smds.CreateFileSystem(h.config.context, h.config.namespace, fs, h.config.versionTag, h.config.hostNetwork); err != nil {
 		logger.Errorf("failed to start mds: %+v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -86,15 +68,22 @@ func (h *Handler) CreateFileSystem(w http.ResponseWriter, r *http.Request) {
 }
 
 // Removes an existing filesystem from this cluster.
-// POST
-// /filesystem/remove
+// DELETE
+// /filesystem?name=<fsName>
 func (h *Handler) RemoveFileSystem(w http.ResponseWriter, r *http.Request) {
-	fs, ok := handleReadFilesystemRequest(w, r, "remove filesystem")
-	if !ok {
+	fsName := r.URL.Query().Get("name")
+	fs := &model.FilesystemRequest{
+		Name: fsName,
+	}
+
+	if fs.Name == "" {
+		logger.Errorf("filesystem missing required fields: %+v", fs)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	if err := h.config.ClusterHandler.RemoveFileSystem(fs); err != nil {
+	f := &k8smds.Filesystem{ObjectMeta: metav1.ObjectMeta{Name: fs.Name, Namespace: h.config.namespace}}
+	if err := f.Delete(h.config.context); err != nil {
 		logger.Errorf("failed to remove file system: %+v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return

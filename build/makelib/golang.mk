@@ -17,100 +17,86 @@
 #
 
 ifeq ($(GO_PROJECT),)
-$(error the variable $$GO_PROJECT must be set prior to including golang.mk)
+$(error the variable GO_PROJECT must be set prior to including golang.mk)
 endif
 
-# These targets will statically or dynamically linked depending on whether they
-# import the standard net, os/user packages.
-GO_NONSTATIC_PACKAGES ?=
-
-# These targets will statically or dynamically linked depending on whether they
-# import the standard net, os/user packages. Buildmode PIE will be enabled.
-GO_NONSTATIC_PIE_PACKAGES ?=
-
-# These targets do not use cgo or SWIG and contain all pure go code. They will
-# be forced to link statically even if they import the net or os/user packages.
+# These targets will be statically linked.
 GO_STATIC_PACKAGES ?=
 
-# These targets are a mix of go and non-go code. They will be linked statically
-# or dynamically based on the linker flags passed through ldflags.
-GO_STATIC_CGO_PACKAGES ?=
-
-ifeq ($(GO_NONSTATIC_PACKAGES)$(GO_NONSTATIC_PIE_PACKAGES)$(GO_STATIC_PACKAGES)$(GO_STATIC_CGO_PACKAGES),)
-$(error please set GO_NONSTATIC_PACKAGES, GO_NONSTATIC_PIE_PACKAGES, GO_STATIC_PACKAGES and/or GO_STATIC_CGO_PACKAGES prior to including golang.mk)
+ifeq ($(GO_STATIC_PACKAGES),)
+$(error please set GO_STATIC_PACKAGES prior to including golang.mk)
 endif
 
-# Optional. These are sudirs that we look for all go files to test, vet, and fmt
+# These are the static test packages
+GO_STATIC_PACKAGES ?=
+
+# Optional. These are subdirs that we look for all go files to test, vet, and fmt
 GO_SUBDIRS ?= cmd pkg
 
+# Optional. Additional subdirs used for integration or e2e testings
+GO_INTEGRATION_TESTS_SUBDIRS ?= tests
+
 # Optional directories (relative to CURDIR)
-GO_BIN_DIR ?= bin
-GO_TOOLS_DIR ?= tools
 GO_VENDOR_DIR ?= vendor
-GO_PKG_DIR ?=
+GO_PKG_DIR ?= $(WORK_DIR)/pkg
 
 # Optional build flags passed to go tools
 GO_BUILDFLAGS ?=
 GO_LDFLAGS ?=
 GO_TAGS ?=
-
-# Optional CGO flags directories
-CGO_CFLAGS ?=
-CGO_CXXFLAGS ?=
-CGO_LDFLAGS ?=
-
-# Optional prerequisities for CGO builds
-CGO_PREREQS ?=
-
-# Optional OS and ARCH to build
-GOOS ?= $(shell go env GOOS)
-GOARCH ?= $(shell go env GOARCH)
+GO_TEST_FLAGS ?=
 
 # ====================================================================================
 # Setup go environment
 
-GO_SUPPORTED_VERSIONS ?= 1.6|1.7
+GO_SUPPORTED_VERSIONS ?= 1.7|1.8|1.9
 
-GOROOT = $(shell go env GOROOT)
-GOPATH = $(shell go env GOPATH)
-GOHOSTOS = $(shell go env GOHOSTOS)
-GOHOSTARCH = $(shell go env GOHOSTARCH)
+GO_PACKAGES := $(foreach t,$(GO_SUBDIRS),$(GO_PROJECT)/$(t)/...)
+GO_INTEGRATION_TEST_PACKAGES := $(foreach t,$(GO_INTEGRATION_TESTS_SUBDIRS),$(GO_PROJECT)/$(t)/integration)
 
-GO_ALL_PACKAGES := $(foreach t,$(GO_SUBDIRS),$(GO_PROJECT)/$(t)/...)
+ifneq ($(GO_TEST_SUITE),)
+GO_TEST_FLAGS += -run '$(GO_TEST_SUITE)'
+endif
 
-unexport CGO_ENABLED
-export CGO_CFLAGS CGO_CPPFLAGS CGO_LDFLAGS GLIDE_HOME
+ifneq ($(GO_TEST_FILTER),)
+TEST_FILTER_PARAM := -testify.m '$(GO_TEST_FILTER)'
+endif
 
-# setup glide
-GLIDE_HOME := $(abspath .glide)
-GLIDE := $(GO_TOOLS_DIR)/glide
+GOPATH := $(shell go env GOPATH)
+
+# setup tools used during the build
+DEP_VERSION=v0.3.2
+DEP := $(TOOLS_HOST_DIR)/dep-$(DEP_VERSION)
+GOLINT := $(TOOLS_HOST_DIR)/golint
+GOJUNIT := $(TOOLS_HOST_DIR)/go-junit-report
 
 GO := go
 GOHOST := GOOS=$(GOHOSTOS) GOARCH=$(GOHOSTARCH) go
 
-GO_OUT_DIR := $(abspath $(GO_BIN_DIR)/$(GOOS)_$(GOARCH))
+GO_OUT_DIR := $(abspath $(OUTPUT_DIR)/bin/$(PLATFORM))
+GO_TEST_OUTPUT := $(abspath $(OUTPUT_DIR)/tests/$(PLATFORM))
 
 ifeq ($(GOOS),windows)
 GO_OUT_EXT := .exe
 endif
 
+# NOTE: the install suffixes are matched with the build container to speed up the
+# the build. Please keep them in sync.
+
+# we run go build with -i which on most system's would want to install packages
+# into the system's root dir. using our own pkg dir avoid thats
 ifneq ($(GO_PKG_DIR),)
-GO_PKG_FLAGS := -pkgdir $(abspath $(GO_PKG_DIR)/$(GOOS)_$(GOARCH))
+GO_PKG_BASE_DIR := $(abspath $(GO_PKG_DIR)/$(PLATFORM))
+GO_PKG_STATIC_FLAGS := -pkgdir $(GO_PKG_BASE_DIR)_static
 endif
 
-# these configurations are matched with the ones in build/cross-image/Dockerfile
-GO_NONSTATIC_FLAGS      = $(GO_BUILDFLAGS) $(GO_PKG_FLAGS) -tags '$(GO_TAGS)' -ldflags '$(GO_LDFLAGS)'
-GO_NONSTATIC_PIE_FLAGS  = $(GO_BUILDFLAGS) $(GO_PKG_FLAGS) -installsuffix pie -buildmode pie -tags '$(GO_TAGS)' -ldflags '$(GO_LDFLAGS)'
-# note the we remove the symbol table since its not needed for pure golang binaries. for backtraces go
-# uses its own ELF section and does not depend on the symbol tables.
-GO_STATIC_FLAGS         = $(GO_BUILDFLAGS) $(GO_PKG_FLAGS) -installsuffix nocgo -tags '$(GO_TAGS)' -ldflags '-s $(GO_LDFLAGS)'
-# for cgo binaries we need the symbol table to support backtraces, so no -s here.
-GO_STATIC_CGO_FLAGS     = $(GO_BUILDFLAGS) $(GO_PKG_FLAGS) -installsuffix netgo -tags '$(GO_TAGS) netgo' -ldflags '$(GO_LDFLAGS) -extldflags "-static"'
+GO_COMMON_FLAGS = $(GO_BUILDFLAGS) -tags '$(GO_TAGS)'
+GO_STATIC_FLAGS = $(GO_COMMON_FLAGS) $(GO_PKG_STATIC_FLAGS) -installsuffix static  -ldflags '$(GO_LDFLAGS)'
 
 # ====================================================================================
 # Targets
 
-ifeq ($(filter help clean distclean, $(MAKECMDGOALS)),)
+ifeq ($(filter help clean distclean prune go.clean, $(MAKECMDGOALS)),)
 .PHONY: go.check
 go.check:
 ifneq ($(shell $(GO) version | grep -q -E '\bgo($(GO_SUPPORTED_VERSIONS))\b' && echo 0 || echo 1), 0)
@@ -121,69 +107,88 @@ ifneq ($(realpath ../../../..), $(realpath $(GOPATH)))
 endif
 
 -include go.check
+endif
 
 .PHONY: go.init
-go.init: $(GO_VENDOR_DIR)/vendor.stamp
-
--include go.init
-endif
+go.init: go.vendor.lite
+	@:
 
 .PHONY: go.build
-go.build: go.vet go.fmt $(CGO_PREREQS)
-	@$(foreach p,$(GO_NONSTATIC_PACKAGES),CGO_ENABLED=1 $(GO) build -v -i -o $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_NONSTATIC_FLAGS) $(p);)
-	@$(foreach p,$(GO_NONSTATIC_PIE_PACKAGES),CGO_ENABLED=1 $(GO) build -v -i -o $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_NONSTATIC_PIE_FLAGS) $(p);)
-	@$(foreach p,$(GO_STATIC_PACKAGES),CGO_ENABLED=0 $(GO) build -v -i -o $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_STATIC_FLAGS) $(p);)
-	@$(foreach p,$(GO_STATIC_CGO_PACKAGES),CGO_ENABLED=1 $(GO) build -v -i -o $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_STATIC_CGO_FLAGS) $(p);)
-ifeq ($(RELEASEBUILD),1)
-ifeq ($(GOOS),linux)
-#	@$(foreach p,$(GO_STATIC_CGO_PACKAGES) $(GO_NONSTATIC_PACKAGES) $(GO_NONSTATIC_PIE_PACKAGES),dwz $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT);)
-	@$(foreach p,$(GO_STATIC_CGO_PACKAGES) $(GO_NONSTATIC_PACKAGES) $(GO_NONSTATIC_PIE_PACKAGES),$(OBJCOPY) --only-keep-debug $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p))).debug;)
-	@$(foreach p,$(GO_STATIC_CGO_PACKAGES) $(GO_NONSTATIC_PACKAGES) $(GO_NONSTATIC_PIE_PACKAGES),$(OBJCOPY) --strip-debug $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT);)
-	@$(foreach p,$(GO_STATIC_CGO_PACKAGES) $(GO_NONSTATIC_PACKAGES) $(GO_NONSTATIC_PIE_PACKAGES),$(OBJCOPY) --add-gnu-debuglink=$(GO_OUT_DIR)/$(lastword $(subst /, ,$(p))).debug $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT);)
-endif
-endif
+go.build:
+	@echo === go build $(PLATFORM)
+	$(foreach p,$(GO_STATIC_PACKAGES),@CGO_ENABLED=0 $(GO) build -v -i -o $(GO_OUT_DIR)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_STATIC_FLAGS) $(p)${\n})
+	$(foreach p,$(GO_TEST_PACKAGES) $(GO_LONGHAUL_TEST_PACKAGES),@CGO_ENABLED=0 $(GO) test -v -i -c -o $(GO_TEST_OUTPUT)/$(lastword $(subst /, ,$(p)))$(GO_OUT_EXT) $(GO_STATIC_FLAGS) $(p)${\n})
 
 .PHONY: go.install
-go.install: go.vet go.fmt $(CGO_PREREQS)
-	@$(foreach p,$(GO_NONSTATIC_PACKAGES),CGO_ENABLED=1 $(GO) install -v $(GO_NONSTATIC_FLAGS) $(p);)
-	@$(foreach p,$(GO_NONSTATIC_PIE_PACKAGES),CGO_ENABLED=1 $(GO) install -v $(GO_NONSTATIC_PIE_FLAGS) $(p);)
-	@$(foreach p,$(GO_STATIC_PACKAGES),CGO_ENABLED=0 $(GO) install -v $(GO_STATIC_FLAGS) $(p);)
-	@$(foreach p,$(GO_STATIC_CGO_PACKAGES),CGO_ENABLED=1 $(GO) install -v $(GO_STATIC_CGO_FLAGS) $(p);)
+go.install:
+	@echo === go install $(PLATFORM)
+	$(foreach p,$(GO_STATIC_PACKAGES),@CGO_ENABLED=0 $(GO) install -v $(GO_STATIC_FLAGS) $(p)${\n})
 
-.PHONY: go.test
-go.test: go.vet go.fmt $(CGO_PREREQS)
-#   this is disabled since it looks like there's a bug in go test where it attempts to install cmd/cgo
-#	@$(GOHOST) test -v -i $(GO_PKG_FLAGS) $(GO_NONSTATIC_FLAGS) $(GO_ALL_PACKAGES)
-	@$(GOHOST) test -cover $(GO_PKG_FLAGS) $(GO_NONSTATIC_FLAGS) $(GO_ALL_PACKAGES)
+.PHONY: go.test.unit
+go.test.unit: $(GOJUNIT)
+	@echo === go test unit-tests
+	@mkdir -p $(GO_TEST_OUTPUT)
+	@CGO_ENABLED=0 $(GOHOST) test -v -i -cover $(GO_STATIC_FLAGS) $(GO_PACKAGES)
+	@CGO_ENABLED=0 $(GOHOST) test -v -cover $(GO_TEST_FLAGS) $(GO_STATIC_FLAGS) $(GO_PACKAGES) 2>&1 | tee $(GO_TEST_OUTPUT)/unit-tests.log
+	@cat $(GO_TEST_OUTPUT)/unit-tests.log | $(GOJUNIT) -set-exit-code > $(GO_TEST_OUTPUT)/unit-tests.xml
+
+.PHONY:
+go.test.integration: $(GOJUNIT)
+	@echo === go test integration-tests
+	@mkdir -p $(GO_TEST_OUTPUT)
+	@CGO_ENABLED=0 $(GOHOST) test -v -i $(GO_STATIC_FLAGS) $(GO_INTEGRATION_TEST_PACKAGES)
+	@CGO_ENABLED=0 $(GOHOST) test -v $(GO_TEST_FLAGS) $(GO_STATIC_FLAGS) $(GO_INTEGRATION_TEST_PACKAGES) $(TEST_FILTER_PARAM) 2>&1 | tee $(GO_TEST_OUTPUT)/integration-tests.log
+	@cat $(GO_TEST_OUTPUT)/integration-tests.log | $(GOJUNIT) -set-exit-code > $(GO_TEST_OUTPUT)/integration-tests.xml
+
+.PHONY: go.lint
+go.lint: $(GOLINT)
+	@echo === go lint
+	@$(GOLINT) -set_exit_status=true $(GO_PACKAGES) $(GO_INTEGRATION_TEST_PACKAGES)
 
 .PHONY: go.vet
 go.vet:
-	@$(GOHOST) vet $(GO_NONSTATIC_FLAGS) $(GO_ALL_PACKAGES)
+	@echo === go vet
+	@$(GOHOST) vet $(GO_COMMON_FLAGS) $(GO_PACKAGES) $(GO_INTEGRATION_TEST_PACKAGES)
 
 .PHONY: go.fmt
 go.fmt:
-	@$(GOHOST) fmt $(GO_ALL_PACKAGES)
+	@gofmt_out=$$(gofmt -s -d -e $(GO_SUBDIRS) $(GO_INTEGRATION_TESTS_SUBDIRS) 2>&1) && [ -z "$${gofmt_out}" ] || (echo "$${gofmt_out}" 1>&2; exit 1)
+
+go.validate: go.vet go.fmt
+
+.PHONY: go.vendor.lite
+go.vendor.lite: $(DEP)
+#	dep ensure blindly updates the whole vendor tree causing everything to be rebuilt. This workaround
+#	will only call dep ensure if the .lock file changes or if the vendor dir is non-existent.
+	@if [ ! -d $(GO_VENDOR_DIR) ] || [ ! $(DEP) ensure -no-vendor -dry-run &> /dev/null ]; then \
+		echo === updating vendor dependencies ;\
+		$(DEP) ensure ;\
+	fi
 
 .PHONY: go.vendor
-go.vendor $(GO_VENDOR_DIR)/vendor.stamp: $(GO_TOOLS_DIR)/glide
-	@mkdir -p $(GLIDE_HOME)
-	@$(GLIDE) install
-	@touch $(GO_VENDOR_DIR)/vendor.stamp
+go.vendor: $(DEP)
+	@echo === ensuring vendor dependencies are up to date
+	@$(DEP) ensure
 
-$(GO_TOOLS_DIR)/glide:
-	@echo "installing glide"
-	@mkdir -p $(GO_TOOLS_DIR)
-	@curl -sL https://github.com/Masterminds/glide/releases/download/v0.12.3/glide-v0.12.3-$(GOHOSTOS)-$(GOHOSTARCH).tar.gz | tar -xz -C $(GO_TOOLS_DIR)
-	@mv $(GO_TOOLS_DIR)/$(GOHOSTOS)-$(GOHOSTARCH)/glide $(GO_TOOLS_DIR)/glide
-	@rm -r $(GO_TOOLS_DIR)/$(GOHOSTOS)-$(GOHOSTARCH)
+$(DEP):
+	@echo === installing dep
+	@mkdir -p $(TOOLS_HOST_DIR)
+	@curl -sL -o $(DEP) https://github.com/golang/dep/releases/download/$(DEP_VERSION)/dep-$(GOHOSTOS)-$(GOHOSTARCH)
+	@chmod +x $(DEP)
 
-.PHONY: go.clean
-go.clean: ;
-	@rm -rf $(GO_BIN_DIR)/*
-ifneq ($(GO_PKG_DIR),)
-	@rm -rf $(GO_PKG_DIR)
-endif
+$(GOLINT):
+	@echo === installing golint
+	@mkdir -p $(TOOLS_HOST_DIR)/tmp
+	@GOPATH=$(TOOLS_HOST_DIR)/tmp GOBIN=$(TOOLS_HOST_DIR) $(GOHOST) get github.com/golang/lint/golint
+	@rm -fr $(TOOLS_HOST_DIR)/tmp
+
+$(GOJUNIT):
+	@echo === installing go-junit-report
+	@mkdir -p $(TOOLS_HOST_DIR)/tmp
+	@GOPATH=$(TOOLS_HOST_DIR)/tmp GOBIN=$(TOOLS_HOST_DIR) $(GOHOST) get github.com/jstemmer/go-junit-report
+	@rm -fr $(TOOLS_HOST_DIR)/tmp
 
 .PHONY: go.distclean
-go.distclean: go.clean
-	@rm -rf  $(GO_TOOLS_DIR) $(GO_VENDOR_DIR) $(GLIDE_HOME)
+go.distclean:
+	@rm -rf $(GO_VENDOR_DIR)
+

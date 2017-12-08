@@ -12,74 +12,140 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+Some of the code below came from https://github.com/coreos/etcd-operator
+which also has the apache 2.0 license.
 */
+
+// Package operator to manage Kubernetes storage.
 package operator
 
 import (
 	"fmt"
-	"sync"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"k8s.io/client-go/1.5/kubernetes"
-
-	"github.com/rook/rook/pkg/cephmgr/client"
-	"github.com/rook/rook/pkg/operator/api"
-	"github.com/rook/rook/pkg/operator/mon"
-	"github.com/rook/rook/pkg/operator/osd"
+	"github.com/coreos/pkg/capnslog"
+	opkit "github.com/rook/operator-kit"
+	flexcrd "github.com/rook/rook/pkg/agent/flexvolume/crd"
+	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/operator/agent"
+	"github.com/rook/rook/pkg/operator/cluster"
+	"github.com/rook/rook/pkg/operator/k8sutil"
+	"github.com/rook/rook/pkg/operator/mds"
+	"github.com/rook/rook/pkg/operator/pool"
+	"github.com/rook/rook/pkg/operator/provisioner"
+	"github.com/rook/rook/pkg/operator/provisioner/controller"
 	"github.com/rook/rook/pkg/operator/rgw"
+	"k8s.io/api/core/v1"
 )
 
+const (
+	initRetryDelay = 10 * time.Second
+)
+
+// volume provisioner constant
+const (
+	provisionerName = "rook.io/block"
+)
+
+var logger = capnslog.NewPackageLogger("github.com/rook/rook", "operator")
+
+// Operator type for managing storage
 type Operator struct {
-	Namespace        string
-	MasterHost       string
-	containerVersion string
-	clientset        *kubernetes.Clientset
-	waitCluster      sync.WaitGroup
-	factory          client.ConnectionFactory
-	useAllDevices    bool
+	context   *clusterd.Context
+	resources []opkit.CustomResource
+	// The custom resource that is global to the kubernetes cluster.
+	// The cluster is global because you create multiple clusers in k8s
+	clusterController *cluster.ClusterController
+	volumeProvisioner controller.Provisioner
 }
 
-func New(namespace string, factory client.ConnectionFactory, clientset *kubernetes.Clientset, containerVersion string, useAllDevices bool) *Operator {
+// New creates an operator instance
+func New(context *clusterd.Context, volumeAttachmentController flexcrd.VolumeAttachmentController) *Operator {
+	clusterController := cluster.NewClusterController(context, volumeAttachmentController)
+	volumeProvisioner := provisioner.New(context)
+
+	schemes := []opkit.CustomResource{cluster.ClusterResource, pool.PoolResource, rgw.ObjectStoreResource,
+		mds.FilesystemResource, flexcrd.VolumeAttachmentResource}
 	return &Operator{
-		Namespace:        namespace,
-		factory:          factory,
-		clientset:        clientset,
-		containerVersion: containerVersion,
-		useAllDevices:    useAllDevices,
+		context:           context,
+		clusterController: clusterController,
+		resources:         schemes,
+		volumeProvisioner: volumeProvisioner,
 	}
 }
 
+// Run the operator instance
 func (o *Operator) Run() error {
 
-	// Start the mon pods
-	m := mon.New(o.Namespace, o.factory, o.containerVersion)
-	cluster, err := m.Start(o.clientset)
-	if err != nil {
-		return fmt.Errorf("failed to start the mons. %+v", err)
+	namespace := os.Getenv(k8sutil.PodNamespaceEnvVar)
+	if namespace == "" {
+		return fmt.Errorf("Rook operator namespace is not provided. Expose it via downward API in the rook operator manifest file using environment variable %s", k8sutil.PodNamespaceEnvVar)
 	}
 
-	a := api.New(o.Namespace, o.containerVersion)
-	err = a.Start(o.clientset, cluster)
-	if err != nil {
-		return fmt.Errorf("failed to start the REST api. %+v", err)
+	for {
+		err := o.initResources()
+		if err == nil {
+			break
+		}
+		logger.Errorf("failed to init resources. %+v. retrying...", err)
+		<-time.After(initRetryDelay)
 	}
 
-	// Start the OSDs
-	osds := osd.New(o.Namespace, o.containerVersion, o.useAllDevices)
-	err = osds.Start(o.clientset, cluster)
-	if err != nil {
-		return fmt.Errorf("failed to start the osds. %+v", err)
+	rookAgent := agent.New(o.context.Clientset)
+
+	if err := rookAgent.Start(namespace); err != nil {
+		return fmt.Errorf("Error starting agent daemonset: %v", err)
 	}
 
-	// Start the object store
-	r := rgw.New(o.Namespace, o.containerVersion, o.factory)
-	err = r.Start(o.clientset, cluster)
+	signalChan := make(chan os.Signal, 1)
+	stopChan := make(chan struct{})
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Run volume provisioner
+	// The controller needs to know what the server version is because out-of-tree
+	// provisioners aren't officially supported until 1.5
+	serverVersion, err := o.context.Clientset.Discovery().ServerVersion()
 	if err != nil {
-		return fmt.Errorf("failed to start rgw. %+v", err)
+		return fmt.Errorf("Error getting server version: %v", err)
+	}
+	pc := controller.NewProvisionController(
+		o.context.Clientset,
+		provisionerName,
+		o.volumeProvisioner,
+		serverVersion.GitVersion,
+	)
+	go pc.Run(stopChan)
+	logger.Infof("rook-provisioner started")
+
+	// watch for changes to the rook clusters
+	o.clusterController.StartWatch(v1.NamespaceAll, stopChan)
+
+	for {
+		select {
+		case <-signalChan:
+			logger.Infof("shutdown signal received, exiting...")
+			close(stopChan)
+			return nil
+		}
+	}
+}
+
+func (o *Operator) initResources() error {
+	kitCtx := opkit.Context{
+		Clientset:             o.context.Clientset,
+		APIExtensionClientset: o.context.APIExtensionClientset,
+		Interval:              500 * time.Millisecond,
+		Timeout:               60 * time.Second,
 	}
 
-	logger.Infof("DONE!")
-	<-time.After(1000000 * time.Second)
-
+	// Create and wait for CRD resources
+	err := opkit.CreateCustomResources(kitCtx, o.resources)
+	if err != nil {
+		return fmt.Errorf("failed to create custom resource. %+v", err)
+	}
 	return nil
 }

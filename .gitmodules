@@ -1,3 +1,0 @@
-[submodule "ceph"]
-	path = ceph
-	url = https://github.com/rook/ceph.git

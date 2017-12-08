@@ -16,61 +16,177 @@ limitations under the License.
 Some of the code below came from https://github.com/coreos/etcd-operator
 which also has the apache 2.0 license.
 */
+
+// Package k8sutil for Kubernetes helpers.
 package k8sutil
 
 import (
-	"encoding/json"
 	"fmt"
+	"os"
+	"path"
+	"time"
 
-	"k8s.io/client-go/1.5/pkg/api"
-	unversionedAPI "k8s.io/client-go/1.5/pkg/api/unversioned"
-	"k8s.io/client-go/1.5/pkg/api/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 )
 
 const (
-	AppAttr     = "app"
+	// AppAttr app label
+	AppAttr = "app"
+	// ClusterAttr cluster label
 	ClusterAttr = "rook_cluster"
+	// VersionAttr version label
 	VersionAttr = "rook_version"
-	PodIPEnvVar = "ROOKD_PRIVATE_IPV4"
+	// PublicIPEnvVar public IP env var
+	PublicIPEnvVar = "ROOK_PUBLIC_IPV4"
+	// PrivateIPEnvVar pod IP env var
+	PrivateIPEnvVar = "ROOK_PRIVATE_IPV4"
+
+	// DefaultRepoPrefix repo prefix
+	DefaultRepoPrefix = "rook"
+	// ConfigOverrideName config override name
+	ConfigOverrideName = "rook-config-override"
+	// ConfigOverrideVal config override value
+	ConfigOverrideVal = "config"
+	repoPrefixEnvVar  = "ROOK_REPO_PREFIX"
+	defaultVersion    = "latest"
+	configMountDir    = "/etc/rook/config"
+	overrideFilename  = "override.conf"
 )
 
+// ConfigOverrideMount is an override mount
+func ConfigOverrideMount() v1.VolumeMount {
+	return v1.VolumeMount{Name: ConfigOverrideName, MountPath: configMountDir}
+}
+
+// ConfigOverrideVolume is an override volume
+func ConfigOverrideVolume() v1.Volume {
+	cmSource := &v1.ConfigMapVolumeSource{Items: []v1.KeyToPath{{Key: ConfigOverrideVal, Path: overrideFilename}}}
+	cmSource.Name = ConfigOverrideName
+	return v1.Volume{Name: ConfigOverrideName, VolumeSource: v1.VolumeSource{ConfigMap: cmSource}}
+}
+
+// ConfigOverrideEnvVar config override env var
+func ConfigOverrideEnvVar() v1.EnvVar {
+	return v1.EnvVar{Name: "ROOK_CEPH_CONFIG_OVERRIDE", Value: path.Join(configMountDir, overrideFilename)}
+}
+
+// PodIPEnvVar private ip env var
+func PodIPEnvVar(property string) v1.EnvVar {
+	return v1.EnvVar{Name: property, ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "status.podIP"}}}
+}
+
+// NamespaceEnvVar namespace env var
+func NamespaceEnvVar() v1.EnvVar {
+	return v1.EnvVar{Name: PodNamespaceEnvVar, ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}}
+}
+
+// NameEnvVar pod name env var
+func NameEnvVar() v1.EnvVar {
+	return v1.EnvVar{Name: PodNameEnvVar, ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "metadata.name"}}}
+}
+
+// NodeEnvVar node env var
+func NodeEnvVar() v1.EnvVar {
+	return v1.EnvVar{Name: NodeNameEnvVar, ValueFrom: &v1.EnvVarSource{FieldRef: &v1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}}
+}
+
+// RepoPrefixEnvVar repo prefix env var
+func RepoPrefixEnvVar() v1.EnvVar {
+	return v1.EnvVar{Name: repoPrefixEnvVar, Value: repoPrefix()}
+}
+
+// ConfigDirEnvVar config dir env var
+func ConfigDirEnvVar() v1.EnvVar {
+	return v1.EnvVar{Name: "ROOK_CONFIG_DIR", Value: DataDir}
+}
+
+func repoPrefix() string {
+	r := os.Getenv(repoPrefixEnvVar)
+	if r == "" {
+		r = DefaultRepoPrefix
+	}
+	return r
+}
+
+func getVersion(version string) string {
+	if version == "" {
+		version = defaultVersion
+	}
+
+	return version
+}
+
+// MakeRookImage formats the container name
 func MakeRookImage(version string) string {
-	return fmt.Sprintf("quay.io/rook/rookd:%v", version)
+	return fmt.Sprintf("%s/rook:%v", repoPrefix(), getVersion(version))
 }
 
-func PodWithAntiAffinity(pod *v1.Pod, attribute, value string) {
-	// set pod anti-affinity with the pods that belongs to the same rook cluster
-	affinity := v1.Affinity{
-		PodAntiAffinity: &v1.PodAntiAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
-				{
-					LabelSelector: &unversionedAPI.LabelSelector{
-						MatchLabels: map[string]string{
-							attribute: value,
-						},
-					},
-					TopologyKey: "kubernetes.io/hostname",
-				},
-			},
-		},
-	}
-
-	affinityb, err := json.Marshal(affinity)
-	if err != nil {
-		panic("failed to marshal affinty struct")
-	}
-
-	pod.Annotations[api.AffinityAnnotationKey] = string(affinityb)
-}
-
+// SetPodVersion sets the pod annotation
 func SetPodVersion(pod *v1.Pod, key, version string) {
 	pod.Annotations[key] = version
 }
 
-func GetPodNames(pods []*api.Pod) []string {
-	res := []string{}
-	for _, p := range pods {
-		res = append(res, p.Name)
+// DeleteDeployment makes a best effort at deleting a deployment and its pods, then waits for them to be deleted
+func DeleteDeployment(clientset kubernetes.Interface, namespace, name string) error {
+	logger.Infof("removing %s deployment if it exists", name)
+	deleteAction := func(options *metav1.DeleteOptions) error {
+		return clientset.ExtensionsV1beta1().Deployments(namespace).Delete(name, options)
 	}
-	return res
+	getAction := func() error {
+		_, err := clientset.ExtensionsV1beta1().Deployments(namespace).Get(name, metav1.GetOptions{})
+		return err
+	}
+	return deletePodsAndWait(namespace, name, deleteAction, getAction)
+}
+
+// DeleteDaemonset makes a best effort at deleting a daemonset and its pods, then waits for them to be deleted
+func DeleteDaemonset(clientset kubernetes.Interface, namespace, name string) error {
+	logger.Infof("removing %s daemonset if it exists", name)
+	deleteAction := func(options *metav1.DeleteOptions) error {
+		return clientset.ExtensionsV1beta1().DaemonSets(namespace).Delete(name, options)
+	}
+	getAction := func() error {
+		_, err := clientset.ExtensionsV1beta1().DaemonSets(namespace).Get(name, metav1.GetOptions{})
+		return err
+	}
+	return deletePodsAndWait(namespace, name, deleteAction, getAction)
+}
+
+// deletePodsAndWait will delete a resource, then wait for it to be purged from the system
+func deletePodsAndWait(namespace, name string,
+	deleteAction func(*metav1.DeleteOptions) error,
+	getAction func() error) error {
+
+	var gracePeriod int64
+	propagation := metav1.DeletePropagationForeground
+	options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
+
+	// Delete the deployment if it exists
+	err := deleteAction(options)
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete %s. %+v", name, err)
+	}
+
+	// wait for the daemonset and deployments to be deleted
+	sleepTime := 2 * time.Second
+	for i := 0; i < 30; i++ {
+		// check for the existence of the deployment
+		err = getAction()
+		if err != nil {
+			if errors.IsNotFound(err) {
+				logger.Infof("confirmed %s does not exist", name)
+				return nil
+			}
+			return fmt.Errorf("failed to get %s. %+v", name, err)
+		}
+
+		logger.Infof("%s still found. waiting...", name)
+		time.Sleep(sleepTime)
+	}
+
+	return fmt.Errorf("gave up waiting for %s pods to be terminated", name)
 }

@@ -17,25 +17,44 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 
-	ceph "github.com/rook/rook/pkg/cephmgr/client"
-	"github.com/rook/rook/pkg/cephmgr/mon"
-	"github.com/rook/rook/pkg/cephmgr/osd"
+	"github.com/prometheus/client_golang/prometheus"
+	ceph "github.com/rook/rook/pkg/ceph/client"
+	"github.com/rook/rook/pkg/ceph/mon"
 	"github.com/rook/rook/pkg/clusterd"
 )
 
 type Handler struct {
-	context *clusterd.Context
-	config  *Config
+	context      *clusterd.Context
+	config       *Config
+	cephExporter *CephExporter
 }
 
 func newHandler(context *clusterd.Context, config *Config) *Handler {
 	return &Handler{
 		context: context,
 		config:  config,
+	}
+}
+
+// RegisterMetrics registers all collected metrics by this API server.  Note this should be called in a
+// goroutine because it will retry upon failure and block until successful.
+func (h *Handler) RegisterMetrics(retryMs int) error {
+	h.cephExporter = NewCephExporter(h)
+	if err := prometheus.Register(h.cephExporter); err != nil {
+		return fmt.Errorf("failed to register metrics: %+v", err)
+	}
+
+	return nil
+}
+
+func (h *Handler) Shutdown() {
+	if h.cephExporter != nil {
+		prometheus.Unregister(h.cephExporter)
 	}
 }
 
@@ -58,71 +77,6 @@ type overallMonStatus struct {
 	Desired []*mon.CephMonitorConfig `json:"desired"`
 }
 
-// Gets the current crush map for the cluster.
-// GET
-// /crushmap
-func (h *Handler) GetCrushMap(w http.ResponseWriter, r *http.Request) {
-	// connect to ceph
-	conn, ok := h.handleConnectToCeph(w)
-	if !ok {
-		return
-	}
-	defer conn.Shutdown()
-
-	// get the crush map
-	crushmap, err := osd.GetCrushMap(conn)
-	if err != nil {
-		logger.Errorf("failed to get crush map, err: %+v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.Write([]byte(crushmap))
-}
-
-// Gets the monitors that have been created in this cluster.
-// GET
-// /mon
-func (h *Handler) GetMonitors(w http.ResponseWriter, r *http.Request) {
-
-	desiredMons, err := h.config.ClusterHandler.GetMonitors()
-	if err != nil {
-		logger.Errorf("failed to load monitors: %+v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	mons := []*mon.CephMonitorConfig{}
-	if len(desiredMons) == 0 {
-		// no monitors to connect to
-		FormatJsonResponse(w, mons)
-		return
-	}
-
-	// connect to ceph
-	adminConn, ok := h.handleConnectToCeph(w)
-	if !ok {
-		return
-	}
-	defer adminConn.Shutdown()
-
-	// get the monitor status
-	monStatusResp, err := ceph.GetMonStatus(adminConn)
-	if err != nil {
-		logger.Errorf("failed to get mon_status, err: %+v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	status := &overallMonStatus{Status: monStatusResp}
-	for _, mon := range desiredMons {
-		status.Desired = append(status.Desired, mon)
-	}
-
-	FormatJsonResponse(w, status)
-}
-
 func handleReadBody(w http.ResponseWriter, r *http.Request, opName string) ([]byte, bool) {
 	if r.Body == nil {
 		logger.Errorf("nil request body for %s", opName)
@@ -140,25 +94,4 @@ func handleReadBody(w http.ResponseWriter, r *http.Request, opName string) ([]by
 	}
 
 	return body, true
-}
-
-func (h *Handler) handleConnectToCeph(w http.ResponseWriter) (ceph.Connection, bool) {
-	adminConn, err := h.config.ConnFactory.ConnectAsAdmin(h.context, h.config.CephFactory)
-	if err != nil {
-		logger.Errorf("failed to connect to cluster as admin: %+v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return nil, false
-	}
-
-	return adminConn, true
-}
-
-func handleOpenIOContext(w http.ResponseWriter, conn ceph.Connection, pool string) (ceph.IOContext, bool) {
-	ioctx, err := conn.OpenIOContext(pool)
-	if err != nil {
-		logger.Errorf("failed to open ioctx on pool %s: %+v", pool, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return nil, false
-	}
-	return ioctx, true
 }

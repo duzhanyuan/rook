@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# set the shell to bash in case some environments use sh
+include build/makelib/common.mk
+
 .PHONY: all
 all: build
 
@@ -22,59 +23,10 @@ all: build
 # set the shell to bash in case some environments use sh
 SHELL := /bin/bash
 
-# Can be used for additional go build flags
+# Can be used or additional go build flags
 BUILDFLAGS ?=
 LDFLAGS ?=
 TAGS ?=
-
-# if set to 'dynamic' all dependencies are dynamically linked. if
-# set to 'static' all dependencies will be statically linked. If set
-# to 'stdlib' then the standard library will be dynamically
-# linked and everything else will be statically linked.
-LINKMODE ?= dynamic
-ifeq ($(LINKMODE),dynamic)
-TAGS += dynamic
-else
-ifeq ($(LINKMODE),stdlib)
-TAGS += stdlib
-else
-TAGS += static
-endif
-endif
-
-# build a position independent executable. This implies dynamic linking
-# since statically-linked PIE is not supported by the linker/glibc. PIE
-# is only supported on Linux.
-PIE ?= 0
-ifeq ($(PIE),1)
-ifeq ($(LINKMODE),static)
-$(error PIE only supported with dynamic linking. Set LINKMODE=dynamic or LINKMODE=stdlib.)
-endif
-endif
-
-# if DEBUG is set to 1 the binaries will not be optimized
-# enabling easier debugging with gdb. Note that debug symbols
-# are always generated wether DEBUG is 0 or 1.
-DEBUG ?= 0
-
-# the memory allocator to use for cephd
-ALLOCATOR ?= tcmalloc
-ifeq ($(ALLOCATOR),jemalloc)
-CEPHD_ALLOCATOR = jemalloc
-TAGS += jemalloc
-else
-ifeq ($(ALLOCATOR),tcmalloc)
-CEPHD_ALLOCATOR = tcmalloc_minimal
-TAGS += tcmalloc
-else
-ifeq ($(ALLOCATOR),libc)
-CEPHD_ALLOCATOR = libc
-endif
-endif
-endif
-
-# whether to use ccache when building cephd
-CCACHE ?= 1
 
 # turn on more verbose build
 V ?= 0
@@ -86,137 +38,124 @@ else
 MAKEFLAGS += --no-print-directory
 endif
 
-# the operating system and arch to build
-GOOS ?= $(shell go env GOOS)
-GOARCH ?= $(shell go env GOARCH)
+# whether to generate debug information in binaries. this includes DWARF
+# and symbol tables.
+DEBUG ?= 0
+ifeq ($(DEBUG),0)
+LDFLAGS += -s -w
+endif
 
-# the working directory to store packages and intermediate build files
-WORKDIR ?= .work
+# platforms
+PLATFORMS ?= $(ALL_PLATFORMS)
+SERVER_PLATFORMS := $(filter linux_%,$(PLATFORMS))
+CLIENT_PLATFORMS := $(filter-out linux_%,$(PLATFORMS))
 
-# bin and relase dirs
-BIN_DIR=bin
-RELEASE_DIR=release
+# client projects that we build on all platforms
+CLIENT_PACKAGES = $(GO_PROJECT)/cmd/rookctl
 
-CLIENT_SERVER_PLATFORMS ?= linux_amd64 linux_arm64
-CLIENT_ONLY_PLATFORMS ?= darwin_amd64 windows_amd64
-ALL_PLATFORMS ?= $(CLIENT_SERVER_PLATFORMS) $(CLIENT_ONLY_PLATFORMS)
+# server projects that we build on server platforms
+SERVER_PACKAGES = $(GO_PROJECT)/cmd/rook $(GO_PROJECT)/cmd/rookflex
 
+# tests packages that will be compiled into binaries
+TEST_PACKAGES = $(GO_PROJECT)/tests/integration
+LONGHAUL_TEST_PACKAGES = $(GO_PROJECT)/tests/longhaul
+
+# the root go project
 GO_PROJECT=github.com/rook/rook
 
-# set the version number.
-ifeq ($(origin VERSION), undefined)
-VERSION = $(shell git describe --dirty --always)
-endif
+# inject the version number into the golang version package using the -X linker flag
 LDFLAGS += -X $(GO_PROJECT)/pkg/version.Version=$(VERSION)
 
 # ====================================================================================
-# Setup rookd
+# Setup projects
 
-# support for cross compiling
-include build/makelib/cross.mk
-
-ifeq ($(GOOS)_$(GOARCH),linux_amd64)
-ROOKD_SUPPORTED := 1
+# setup go projects
+GO_STATIC_PACKAGES=
+ifneq ($(filter $(PLATFORM),$(CLIENT_PLATFORMS) $(SERVER_PLATFORMS)),)
+GO_STATIC_PACKAGES += $(CLIENT_PACKAGES)
 endif
-
-ifeq ($(GOOS)_$(GOARCH),linux_arm64)
-ROOKD_SUPPORTED := 1
-endif
-
-ifeq ($(ROOKD_SUPPORTED),1)
-
-CEPHD_DEBUG = $(DEBUG)
-CEPHD_CCACHE = $(CCACHE)
-CEPHD_BUILD_DIR = $(WORKDIR)/ceph
-CEPHD_PLATFORM = $(GOOS)_$(GOARCH)
-
-# go does not check dependencies listed in LDFLAGS. we touch the dummy source file
-# to force go to rebuild cephd
-CEPHD_TOUCH_ON_BUILD = pkg/cephmgr/cephd/dummy.cc
-
-CGO_LDFLAGS = -L$(abspath $(CEPHD_BUILD_DIR)/$(CEPHD_PLATFORM)/lib)
-CGO_PREREQS = cephd.build
-
-include build/makelib/cephd.mk
-
-clean: cephd.clean
-
-endif
-
-# ====================================================================================
-# Setup Go projects
-
-GO_WORK_DIR = $(WORKDIR)
-GO_BIN_DIR = $(BIN_DIR)
-
-ifeq ($(LINKMODE),static)
-GO_STATIC_PACKAGES=$(GO_PROJECT)
-ifeq ($(ROOKD_SUPPORTED),1)
-GO_STATIC_CGO_PACKAGES=$(GO_PROJECT)/cmd/rookd $(GO_PROJECT)/cmd/rook-operator
-endif
-else
-GO_NONSTATIC_PACKAGES=$(GO_PROJECT)
-ifeq ($(ROOKD_SUPPORTED),1)
-ifeq ($(PIE),1)
-GO_NONSTATIC_PIE_PACKAGES+= $(GO_PROJECT)/cmd/rookd $(GO_PROJECT)/cmd/rook-operator
-else
-GO_NONSTATIC_PACKAGES+= $(GO_PROJECT)/cmd/rookd $(GO_PROJECT)/cmd/rook-operator
-endif
-endif
+ifneq ($(filter $(PLATFORM),$(SERVER_PLATFORMS)),)
+GO_STATIC_PACKAGES += $(SERVER_PACKAGES)
 endif
 
 GO_BUILDFLAGS=$(BUILDFLAGS)
 GO_LDFLAGS=$(LDFLAGS)
 GO_TAGS=$(TAGS)
 
-GO_PKG_DIR ?= $(WORKDIR)/pkg
+GO_TEST_PACKAGES=$(TEST_PACKAGES)
+GO_LONGHAUL_TEST_PACKAGES=$(LONGHAUL_TEST_PACKAGES)
+GO_TEST_FLAGS=$(TESTFLAGS)
+GO_TEST_SUITE=$(SUITE)
+GO_TEST_FILTER=$(TESTFILTER)
 
 include build/makelib/golang.mk
 
-# ====================================================================================
-# Setup Distribution
-
-RELEASE_VERSION=$(VERSION)
-RELEASE_BIN_DIR=$(BIN_DIR)
-RELEASE_CLIENT_SERVER_PLATFORMS=$(CLIENT_SERVER_PLATFORMS)
-RELEASE_CLIENT_ONLY_PLATFORMS=$(CLIENT_ONLY_PLATFORMS)
-include build/makelib/release.mk
+# setup helm charts
+include build/makelib/helm.mk
 
 # ====================================================================================
 # Targets
 
-build: go.build
+build.version:
+	@mkdir -p $(OUTPUT_DIR)
+	@echo "$(VERSION)" > $(OUTPUT_DIR)/version
 
-install: go.install
+build.common: build.version helm.build
+	@$(MAKE) go.init
+	@$(MAKE) go.validate
 
-check test: go.test
+do.build.platform.%:
+	@$(MAKE) PLATFORM=$* go.build
 
-vet: go.vet
+do.build.parallel: $(foreach p,$(PLATFORMS), do.build.platform.$(p))
 
-fmt: go.fmt
+build: build.common
+	@$(MAKE) go.build
+# if building on non-linux platforms, also build the linux container
+ifneq ($(GOOS),linux)
+	@$(MAKE) go.build PLATFORM=linux_amd64
+endif
+	@$(MAKE) -C images PLATFORM=linux_amd64
+
+build.all: build.common
+	@$(MAKE) do.build.parallel
+	@$(MAKE) -C images build.all
+
+install: build.common
+	@$(MAKE) go.install
+
+check test:
+	@$(MAKE) go.test.unit
+
+test-integration:
+	@$(MAKE) go.test.integration
+
+lint:
+	@$(MAKE) go.init
+	@$(MAKE) go.lint
+
+vet:
+	@$(MAKE) go.init
+	@$(MAKE) go.vet
+
+fmt:
+	@$(MAKE) go.init
+	@$(MAKE) go.fmt
 
 vendor: go.vendor
 
-clean: go.clean
-	@rm -fr $(WORKDIR) $(RELEASE_DIR)/* $(BIN_DIR)/*
+clean:
+	@$(MAKE) -C images clean
+	@rm -fr $(OUTPUT_DIR) $(WORK_DIR)
 
 distclean: go.distclean clean
+	@rm -fr $(CACHE_DIR)
 
-build.platform.%:
-	@$(MAKE) GOOS=$(word 1, $(subst _, ,$*)) GOARCH=$(word 2, $(subst _, ,$*)) RELEASEBUILD=1 build
+prune:
+	@$(MAKE) -C images prune
 
-build.cross: $(foreach p,$(ALL_PLATFORMS), build.platform.$(p))
-
-cross:
-	@$(MAKE) build.cross
-
-release: cross
-	@$(MAKE) release.build
-
-publish: release
-	@$(MAKE) release.publish
-
-.PHONY: build install test check vet fmt vendor clean distclean cross release publish
+.PHONY: all build.common cross.build.parallel
+.PHONY: build build.all install test check vet fmt vendor clean distclean prune
 
 # ====================================================================================
 # Help
@@ -226,40 +165,29 @@ help:
 	@echo 'Usage: make <OPTIONS> ... <TARGETS>'
 	@echo ''
 	@echo 'Targets:'
-	@echo '    build       Build project for host platform.'
-	@echo '    cross       Build project for all platforms.'
-	@echo '    check       Runs unit tests.'
-	@echo '    clean       Remove all files that are created '
-	@echo '                by building.'
-	@echo '    distclean   Remove all files that are created '
-	@echo '                by building or configuring.'
-	@echo '    fmt         Check formatting of go sources.'
-	@echo '    help        Show this help info.'
-	@echo '    vendor      Installs vendor dependencies.'
-	@echo '    vet         Runs lint checks on go sources.'
-	@echo ''
-	@echo 'Distribution:'
-	@echo '    release     Builds all packages.'
-	@echo '    publish     Builds and publishes all packages.'
+	@echo '    build              Build source code for host platform.'
+	@echo '    build.all          Build source code for all platforms.'
+	@echo '                       Best done in the cross build container'
+	@echo '                       due to cross compiler dependencies.'
+	@echo '    check              Runs unit tests.'
+	@echo '    clean              Remove all files that are created '
+	@echo '                       by building.'
+	@echo '    distclean          Remove all files that are created '
+	@echo '                       by building or configuring.'
+	@echo '    fmt                Check formatting of go sources.'
+	@echo '    lint               Check syntax and styling of go sources.'
+	@echo '    help               Show this help info.'
+	@echo '    prune              Prune cached artifacts.'
+	@echo '    test               Runs unit tests.'
+	@echo '    test-integration   Runs integration tests.'
+	@echo '    vendor             Update vendor dependencies.'
+	@echo '    vet                Runs lint checks on go sources.'
 	@echo ''
 	@echo 'Options:'
-	@echo ''
-	@echo '    GOARCH      The arch to build.'
-	@echo '    CCACHE      Set to 1 to enabled ccache, 0 to disable.'
-	@echo '                The default is 0.'
-	@echo '    DEBUG       Set to 1 to build without any optimizations.'
-	@echo '                The default is 0.'
-	@echo '    PIE         Set to 1 to build build a position independent'
-	@echo '                executable. Can not be combined with LINKMODE'
-	@echo '                set to "static". The default is 0.'
-	@echo '    GOOS        The OS to build for.'
-	@echo '    LINKMODE    Set to "dynamic" to link all libraries dynamically.'
-	@echo '                Set to "stdlib" to link the standard library'
-	@echo '                dynamically and everything else statically. Set to'
-	@echo '                "static" to link everything statically. Default is'
-	@echo '                "dynamic".'
-	@echo '    VERSION     The version information compiled into binaries.'
-	@echo '                The default is obtained from git.'
-	@echo '    V           Set to 1 enable verbose build. Default is 0.'
-	@echo '    WORKDIR     The working directory where most build files'
-	@echo '                are stored. The default is .work'
+	@echo '    DEBUG        Whether to generate debug symbols. Default is 0.'
+	@echo '    PLATFORM     The platform to build.'
+	@echo '    SUITE        The test suite to run.'
+	@echo '    TESTFILTER   Tests to run in a suite.'
+	@echo '    VERSION      The version information compiled into binaries.'
+	@echo '                 The default is obtained from git.'
+	@echo '    V            Set to 1 enable verbose build. Default is 0.'
