@@ -1,46 +1,39 @@
+/*
+Copyright 2016 The Rook Authors. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package longhaul
 
 import (
 	"math/rand"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/icrowley/fake"
 	"github.com/rook/rook/tests/framework/clients"
 	"github.com/rook/rook/tests/framework/installer"
 	"github.com/rook/rook/tests/framework/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"time"
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
 
-}
-
-// Set up rook cluster if necessary
-// create object store if necessary
-// create object store user if necessary
-// returns k8s helper, install helper and s3 helper for the object store that was just created.
-func setUpRook(t func() *testing.T, namespace string) (*utils.K8sHelper, *installer.InstallHelper, *clients.TestClient) {
-	kh, err := utils.CreateK8sHelper(t)
-	assert.Nil(t(), err)
-
-	i := installer.NewK8sRookhelper(kh.Clientset, t)
-	if !kh.IsRookInstalled(namespace) {
-		isRookInstalled, err := i.InstallRookOnK8sWithHostPathAndDevices(namespace, "bluestore", "/temp/rookBackup", true, 3)
-		require.NoError(t(), err)
-		require.True(t(), isRookInstalled)
-	}
-	helper, err := clients.CreateTestClient(kh, namespace)
-	if err != nil {
-		logger.Errorf("Cannot create rook test client, er -> %v", err)
-		t().FailNow()
-	}
-
-	return kh, i, helper
 }
 
 func createObjectStoreAndUser(t func() *testing.T, kh *utils.K8sHelper, tc *clients.TestClient, namespace string, storeName string, userId string, userName string) *utils.S3Helper {
@@ -64,7 +57,7 @@ func createObjectStoreAndUser(t func() *testing.T, kh *utils.K8sHelper, tc *clie
 
 func isObjectStorePresent(kh *utils.K8sHelper, namespace string, storeName string) bool {
 	listOpts := metav1.ListOptions{LabelSelector: "app=rook-ceph-rgw"}
-	podList, err := kh.Clientset.Pods(namespace).List(listOpts)
+	podList, err := kh.Clientset.CoreV1().Pods(namespace).List(listOpts)
 	if err == nil {
 		for _, pod := range podList.Items {
 			lables := pod.GetObjectMeta().GetLabels()
@@ -81,13 +74,24 @@ func performObjectStoreOperations(installer *installer.InstallHelper, s3 *utils.
 	var wg sync.WaitGroup
 	for i := 1; i <= installer.Env.LoadConcurrentRuns; i++ {
 		wg.Add(1)
-		go bucketOperations(s3, bucketName, &wg, installer.Env.LoadTime)
+		go bucketOperations(s3, bucketName, &wg, installer.Env.LoadTime, installer.Env.LoadSize)
 	}
 	wg.Wait()
 }
 
-func bucketOperations(s3 *utils.S3Helper, bucketName string, wg *sync.WaitGroup, runtime int) {
+func bucketOperations(s3 *utils.S3Helper, bucketName string, wg *sync.WaitGroup, runtime int, loadSize string) {
 	defer wg.Done()
+	ds := 512000
+	switch strings.ToLower(loadSize) {
+	case "small":
+		ds = 524288 //.5M * 5 = 2.5M per thread
+	case "medium":
+		ds = 2097152 //2M * 5 = 10M per thread
+	case "large":
+		ds = 10485760 //10M * 5 = 50M per thread
+	default:
+		ds = 1048576 // 1M * 5 = 5M per thread
+	}
 	start := time.Now()
 	elapsed := time.Since(start).Seconds()
 	for elapsed < float64(runtime) {
@@ -95,11 +99,11 @@ func bucketOperations(s3 *utils.S3Helper, bucketName string, wg *sync.WaitGroup,
 		key2 := fake.CharactersN(30)
 		key3 := fake.CharactersN(30)
 		key4 := fake.CharactersN(30)
-		s3.PutObjectInBucket(bucketName, fake.CharactersN(200), key1, "plain/text")
-		s3.PutObjectInBucket(bucketName, fake.CharactersN(200), key2, "plain/text")
-		s3.PutObjectInBucket(bucketName, fake.CharactersN(200), key3, "plain/text")
-		s3.PutObjectInBucket(bucketName, fake.CharactersN(200), key4, "plain/text")
-		s3.PutObjectInBucket(bucketName, fake.CharactersN(200), key1, "plain/text")
+		s3.PutObjectInBucket(bucketName, fake.CharactersN(ds), key1, "plain/text")
+		s3.PutObjectInBucket(bucketName, fake.CharactersN(ds), key2, "plain/text")
+		s3.PutObjectInBucket(bucketName, fake.CharactersN(ds), key3, "plain/text")
+		s3.PutObjectInBucket(bucketName, fake.CharactersN(ds), key4, "plain/text")
+		s3.PutObjectInBucket(bucketName, fake.CharactersN(ds), key1, "plain/text")
 		s3.GetObjectInBucket(bucketName, key1)
 		s3.GetObjectInBucket(bucketName, key2)
 		s3.GetObjectInBucket(bucketName, key3)

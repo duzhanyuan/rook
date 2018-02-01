@@ -12,9 +12,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
-Some of the code below came from https://github.com/coreos/etcd-operator
-which also has the apache 2.0 license.
 */
 
 // Package agent to manage Kubernetes storage attach events.
@@ -26,7 +23,8 @@ import (
 	"os"
 
 	"github.com/coreos/pkg/capnslog"
-	"github.com/rook/rook/pkg/agent/flexvolume/crd"
+	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha1"
+	"github.com/rook/rook/pkg/daemon/agent/flexvolume/attachment"
 	opcluster "github.com/rook/rook/pkg/operator/cluster"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"k8s.io/api/core/v1"
@@ -38,9 +36,11 @@ import (
 )
 
 const (
-	agentDaemonsetName       = "rook-agent"
-	flexvolumePathDirEnv     = "FLEXVOLUME_DIR_PATH"
-	flexvolumeDefaultDirPath = "/usr/libexec/kubernetes/kubelet-plugins/volume/exec/"
+	agentDaemonsetName             = "rook-agent"
+	flexvolumePathDirEnv           = "FLEXVOLUME_DIR_PATH"
+	flexvolumeDefaultDirPath       = "/usr/libexec/kubernetes/kubelet-plugins/volume/exec/"
+	agentDaemonsetTolerationEnv    = "AGENT_TOLERATION"
+	agentDaemonsetTolerationKeyEnv = "AGENT_TOLERATION_KEY"
 )
 
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-agent")
@@ -52,12 +52,12 @@ var clusterAccessRules = []v1beta1.PolicyRule{
 		Verbs:     []string{"get", "list"},
 	},
 	{
-		APIGroups: []string{k8sutil.CustomResourceGroup},
-		Resources: []string{crd.CustomResourceNamePlural},
+		APIGroups: []string{rookalpha.CustomResourceGroup},
+		Resources: []string{attachment.CustomResourceNamePlural},
 		Verbs:     []string{"get", "list", "create", "delete", "update"},
 	},
 	{
-		APIGroups: []string{k8sutil.CustomResourceGroup},
+		APIGroups: []string{rookalpha.CustomResourceGroup},
 		Resources: []string{opcluster.CustomResourceNamePlural},
 		Verbs:     []string{"get", "list", "watch"},
 	},
@@ -76,27 +76,21 @@ func New(clientset kubernetes.Interface) *Agent {
 }
 
 // Start the agent
-func (a *Agent) Start(namespace string) error {
+func (a *Agent) Start(namespace, agentImage string) error {
 
-	err := k8sutil.MakeClusterRole(a.clientset, namespace, agentDaemonsetName, clusterAccessRules)
+	err := k8sutil.MakeClusterRole(a.clientset, namespace, agentDaemonsetName, clusterAccessRules, nil)
 	if err != nil {
 		return fmt.Errorf("failed to init RBAC for rook-agents. %+v", err)
 	}
 
-	err = a.createAgentDaemonSet(namespace)
+	err = a.createAgentDaemonSet(namespace, agentImage)
 	if err != nil {
 		return fmt.Errorf("Error starting agent daemonset: %v", err)
 	}
 	return nil
 }
 
-func (a *Agent) createAgentDaemonSet(namespace string) error {
-
-	// Using the rook-operator image to deploy the rook-agents
-	agentImage, err := getContainerImage(a.clientset)
-	if err != nil {
-		return err
-	}
+func (a *Agent) createAgentDaemonSet(namespace, agentImage string) error {
 
 	flexvolumeDirPath, source := a.discoverFlexvolumeDir()
 	logger.Infof("discovered flexvolume dir path from source %s. value: %s", source, flexvolumeDirPath)
@@ -187,7 +181,19 @@ func (a *Agent) createAgentDaemonSet(namespace string) error {
 		},
 	}
 
-	_, err = a.clientset.Extensions().DaemonSets(namespace).Create(ds)
+	// Add toleration if any
+	tolerationValue := os.Getenv(agentDaemonsetTolerationEnv)
+	if tolerationValue != "" {
+		ds.Spec.Template.Spec.Tolerations = []v1.Toleration{
+			{
+				Effect:   v1.TaintEffect(tolerationValue),
+				Operator: v1.TolerationOpExists,
+				Key:      os.Getenv(agentDaemonsetTolerationKeyEnv),
+			},
+		}
+	}
+
+	_, err := a.clientset.Extensions().DaemonSets(namespace).Create(ds)
 	if err != nil {
 		if !kserrors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create rook-agent daemon set. %+v", err)
@@ -271,27 +277,4 @@ func getDefaultFlexvolumeDir() (flexvolumeDirPath, source string) {
 	flexvolumeDirPath = flexvolumeDefaultDirPath
 
 	return flexvolumeDirPath, "default"
-}
-
-func getContainerImage(clientset kubernetes.Interface) (string, error) {
-
-	podName := os.Getenv(k8sutil.PodNameEnvVar)
-	if podName == "" {
-		return "", fmt.Errorf("cannot detect the pod name. Please provide it using the downward API in the manifest file")
-	}
-	podNamespace := os.Getenv(k8sutil.PodNamespaceEnvVar)
-	if podName == "" {
-		return "", fmt.Errorf("cannot detect the pod namespace. Please provide it using the downward API in the manifest file")
-	}
-
-	pod, err := clientset.Core().Pods(podNamespace).Get(podName, metav1.GetOptions{})
-	if err != nil {
-		return "", err
-	}
-
-	if len(pod.Spec.Containers) != 1 {
-		return "", fmt.Errorf("failed to get container image. There should only be exactly one container in this pod")
-	}
-
-	return pod.Spec.Containers[0].Image, nil
 }

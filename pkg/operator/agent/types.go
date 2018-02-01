@@ -12,9 +12,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
-Some of the code below came from https://github.com/coreos/etcd-operator
-which also has the apache 2.0 license.
 */
 
 // Package agent to manage Kubernetes storage attach events.
@@ -23,7 +20,7 @@ package agent
 import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/pkg/apis/componentconfig"
-	kubeletcomponentconfig "k8s.io/kubernetes/pkg/apis/componentconfig/v1alpha1"
+	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/kubeletconfig/v1alpha1"
 )
 
 // Agent reference to be deployed
@@ -38,7 +35,7 @@ type NodeConfigControllerManager struct {
 
 // NodeConfigKubelet is a reference of all the configuration for the K8S node from kubelet
 type NodeConfigKubelet struct {
-	ComponentConfig kubeletcomponentconfig.KubeletConfiguration `json:"componentconfig"`
+	ComponentConfig kubeletconfig.KubeletConfiguration `json:"componentconfig"`
 }
 
 // KubeletConfiguration represents the response from the node config URI (configz) in Kubernetes 1.8+

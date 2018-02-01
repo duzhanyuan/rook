@@ -12,20 +12,19 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
-Some of the code below came from https://github.com/coreos/etcd-operator
-which also has the apache 2.0 license.
 */
 
 // Package k8sutil for Kubernetes helpers.
 package k8sutil
 
 import (
+	"os"
 	"testing"
 
 	"github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/api/rbac/v1beta1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -57,7 +56,7 @@ func TestMakeRole(t *testing.T) {
 		},
 	}
 
-	err := MakeRole(clientset, namespace, name, rules)
+	err := MakeRole(clientset, namespace, name, rules, metav1.OwnerReference{})
 
 	role, err := clientset.RbacV1beta1().Roles(namespace).Get(name, metav1.GetOptions{})
 	assert.Nil(t, err)
@@ -83,7 +82,7 @@ func TestMakeRole(t *testing.T) {
 		},
 	}
 
-	err = MakeRole(clientset, namespace, name, newRules)
+	err = MakeRole(clientset, namespace, name, newRules, metav1.OwnerReference{})
 	assert.Nil(t, err)
 	role, err = clientset.RbacV1beta1().Roles(namespace).Get(name, metav1.GetOptions{})
 	assert.Nil(t, err)
@@ -111,7 +110,7 @@ func TestMakeClusterRole(t *testing.T) {
 		},
 	}
 
-	err := MakeClusterRole(clientset, namespace, name, rules)
+	err := MakeClusterRole(clientset, namespace, name, rules, nil)
 
 	role, err := clientset.RbacV1beta1().ClusterRoles().Get(name, metav1.GetOptions{})
 	assert.Nil(t, err)
@@ -137,7 +136,7 @@ func TestMakeClusterRole(t *testing.T) {
 		},
 	}
 
-	err = MakeClusterRole(clientset, namespace, name, newRules)
+	err = MakeClusterRole(clientset, namespace, name, newRules, nil)
 	assert.Nil(t, err)
 	role, err = clientset.RbacV1beta1().ClusterRoles().Get(name, metav1.GetOptions{})
 	assert.Nil(t, err)
@@ -145,4 +144,84 @@ func TestMakeClusterRole(t *testing.T) {
 	assert.Equal(t, "", role.Rules[0].APIGroups[0])
 	assert.Equal(t, 1, len(role.Rules[0].Resources))
 	assert.Equal(t, 2, len(role.Rules[0].Verbs))
+}
+
+func TestMakeRoleRBACDisabled(t *testing.T) {
+	os.Setenv(enableRBACEnv, "false")
+	defer os.Unsetenv(enableRBACEnv)
+	clientset := test.New(1)
+	namespace := "myns"
+	name := "myapp"
+
+	rules := []v1beta1.PolicyRule{
+		{
+			APIGroups: []string{""},
+			Resources: []string{"namespaces", "secrets", "pods", "services", "nodes", "configmaps", "events"},
+			Verbs:     []string{"get", "list", "watch", "create", "update"},
+		},
+		{
+			APIGroups: []string{"extensions"},
+			Resources: []string{"thirdpartyresources", "deployments", "daemonsets", "replicasets"},
+			Verbs:     []string{"get", "list", "create", "delete"},
+		},
+		{
+			APIGroups: []string{"apiextensions.k8s.io"},
+			Resources: []string{"customresourcedefinitions"},
+			Verbs:     []string{"get", "list", "create"},
+		},
+		{
+			APIGroups: []string{"storage.k8s.io"},
+			Resources: []string{"storageclasses"},
+			Verbs:     []string{"get", "list"},
+		},
+	}
+
+	err := MakeRole(clientset, namespace, name, rules, metav1.OwnerReference{})
+
+	_, err = clientset.RbacV1beta1().Roles(namespace).Get(name, metav1.GetOptions{})
+	assert.NotNil(t, err)
+	assert.True(t, errors.IsNotFound(err))
+
+	account, err := clientset.CoreV1().ServiceAccounts(namespace).Get(name, metav1.GetOptions{})
+	assert.Nil(t, err)
+	assert.Equal(t, namespace, account.Namespace)
+
+	_, err = clientset.RbacV1beta1().RoleBindings(namespace).Get(name, metav1.GetOptions{})
+	assert.NotNil(t, err)
+	assert.True(t, errors.IsNotFound(err))
+}
+
+func TestMakeClusterRoleRBACDisabled(t *testing.T) {
+	os.Setenv(enableRBACEnv, "false")
+	defer os.Unsetenv(enableRBACEnv)
+	clientset := test.New(1)
+	namespace := "myns"
+	name := "myapp"
+
+	rules := []v1beta1.PolicyRule{
+		{
+			APIGroups: []string{""},
+			Resources: []string{"pods", "secrets", "configmaps", "persistentvolumes", "nodes/proxy"},
+			Verbs:     []string{"get", "list"},
+		},
+		{
+			APIGroups: []string{"storage.k8s.io"},
+			Resources: []string{"storageclasses"},
+			Verbs:     []string{"get"},
+		},
+	}
+
+	err := MakeClusterRole(clientset, namespace, name, rules, nil)
+	assert.Nil(t, err)
+	_, err = clientset.RbacV1beta1().ClusterRoles().Get(name, metav1.GetOptions{})
+	assert.NotNil(t, err)
+	assert.True(t, errors.IsNotFound(err))
+
+	account, err := clientset.CoreV1().ServiceAccounts(namespace).Get(name, metav1.GetOptions{})
+	assert.Nil(t, err)
+	assert.Equal(t, namespace, account.Namespace)
+
+	_, err = clientset.RbacV1beta1().ClusterRoleBindings().Get(name, metav1.GetOptions{})
+	assert.NotNil(t, err)
+	assert.True(t, errors.IsNotFound(err))
 }

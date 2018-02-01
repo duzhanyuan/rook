@@ -16,14 +16,14 @@ limitations under the License.
 package main
 
 import (
+	"flag"
 	"fmt"
 
-	opkit "github.com/rook/operator-kit"
-	flexcrd "github.com/rook/rook/pkg/agent/flexvolume/crd"
 	"github.com/rook/rook/pkg/clusterd"
+	"github.com/rook/rook/pkg/daemon/agent/flexvolume/attachment"
 	"github.com/rook/rook/pkg/operator"
+	"github.com/rook/rook/pkg/operator/cluster/ceph/mon"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	"github.com/rook/rook/pkg/operator/mon"
 	"github.com/rook/rook/pkg/util/flags"
 	"github.com/spf13/cobra"
 )
@@ -47,9 +47,12 @@ func startOperator(cmd *cobra.Command, args []string) error {
 
 	setLogLevel()
 
+	// workaround a k8s logging issue: https://github.com/kubernetes/kubernetes/issues/17162
+	flag.CommandLine.Parse([]string{})
+
 	logStartupInfo(operatorCmd.Flags())
 
-	clientset, apiExtClientset, err := getClientset()
+	clientset, apiExtClientset, rookClientset, err := getClientset()
 	if err != nil {
 		terminateFatal(fmt.Errorf("failed to get k8s client. %+v", err))
 	}
@@ -60,20 +63,19 @@ func startOperator(cmd *cobra.Command, args []string) error {
 	context.ConfigDir = k8sutil.DataDir
 	context.Clientset = clientset
 	context.APIExtensionClientset = apiExtClientset
-
-	volumeAttachmentClient, _, err := opkit.NewHTTPClient(k8sutil.CustomResourceGroup, k8sutil.V1Alpha1, flexcrd.SchemeBuilder)
-	if err != nil {
-		terminateFatal(err)
-	}
-	volumeAttachmentController, err := flexcrd.NewVolumeAttachmentController(context.Clientset, volumeAttachmentClient)
+	context.RookClientset = rookClientset
+	volumeAttachment, err := attachment.New(context)
 	if err != nil {
 		terminateFatal(err)
 	}
 
-	op := operator.New(context, volumeAttachmentController)
-	if op == nil {
-		terminateFatal(fmt.Errorf("failed to create operator."))
+	// Using the rook-operator image to deploy other rook pods
+	rookImage, err := k8sutil.GetContainerImage(clientset)
+	if err != nil {
+		terminateFatal(fmt.Errorf("failed to get container image. %+v\n", err))
 	}
+
+	op := operator.New(context, volumeAttachment, rookImage)
 	err = op.Run()
 	if err != nil {
 		terminateFatal(fmt.Errorf("failed to run operator. %+v\n", err))

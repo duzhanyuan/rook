@@ -1,38 +1,25 @@
 package longhaul
 
 import (
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/coreos/pkg/capnslog"
+	"github.com/rook/rook/tests/framework/clients"
 	"github.com/rook/rook/tests/framework/installer"
 	"github.com/rook/rook/tests/framework/utils"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"time"
 )
 
 var (
-	logger           = capnslog.NewPackageLogger("github.com/rook/rook", "longhaul")
 	defaultNamespace = "default"
 )
 
-func setUpRookAndPoolInNamespace(t func() *testing.T, namespace string, storageClassName string, poolName string) (*utils.K8sHelper, *installer.InstallHelper) {
-	kh, err := utils.CreateK8sHelper(t)
-	assert.Nil(t(), err)
-
-	i := installer.NewK8sRookhelper(kh.Clientset, t)
-	if !kh.IsRookInstalled(namespace) {
-		isRookInstalled, err := i.InstallRookOnK8sWithHostPathAndDevices(namespace, "bluestore", "/temp/rookBackup", true, 3)
-		require.NoError(t(), err)
-		require.True(t(), isRookInstalled)
-	}
-
+// Create StorageClass and poll if needed
+func createStorageClassAndPool(t func() *testing.T, kh *utils.K8sHelper, namespace string, storageClassName string, poolName string) {
 	//create storage class
 	if scp, _ := kh.IsStorageClassPresent(storageClassName); !scp {
-
-		installer.BlockResourceOperation(kh, installer.GetBlockStorageClassDef(poolName, storageClassName, namespace), "create")
-
 		logger.Infof("Install pool and storage class for rook block")
 		_, err := installer.BlockResourceOperation(kh, installer.GetBlockPoolDef(poolName, namespace, "3"), "create")
 		require.NoError(t(), err)
@@ -44,7 +31,6 @@ func setUpRookAndPoolInNamespace(t func() *testing.T, namespace string, storageC
 		require.NoError(t(), err)
 		require.True(t(), present, "Make sure storageclass is present")
 	}
-	return kh, i
 }
 
 // Set Up rook, storageClass ,pvc and mysql pods for longhaul test
@@ -108,24 +94,35 @@ func performBlockOperations(installer *installer.InstallHelper, db *utils.MySQLH
 	var wg sync.WaitGroup
 	for i := 1; i <= installer.Env.LoadConcurrentRuns; i++ {
 		wg.Add(1)
-		go dbOperation(db, &wg, installer.Env.LoadTime)
+		go dbOperation(db, &wg, installer.Env.LoadTime, installer.Env.LoadSize)
 	}
 	wg.Wait()
 }
 
-func dbOperation(db *utils.MySQLHelper, wg *sync.WaitGroup, runtime int) {
+func dbOperation(db *utils.MySQLHelper, wg *sync.WaitGroup, runtime int, loadSize string) {
 	defer wg.Done()
+	ds := 100000
+	switch strings.ToLower(loadSize) {
+	case "small":
+		ds = 105000 //.1M * 5 columns * 6 = 3M per thread
+	case "medium":
+		ds = 419430 // .4M * 5 columns * 6 = 12M per thread
+	case "large":
+		ds = 2100000 // 2M * 5 columns * 6 = 60M per thread
+	default:
+		ds = 209715 // .2M * 5 columns * 6 = 15M per thread
+	}
 	start := time.Now()
 	elapsed := time.Since(start).Seconds()
 	for elapsed < float64(runtime) {
 		//InsertRandomData
-		db.InsertRandomData()
-		db.InsertRandomData()
-		db.InsertRandomData()
+		db.InsertRandomData(ds)
+		db.InsertRandomData(ds)
+		db.InsertRandomData(ds)
 		db.SelectRandomData(5)
-		db.InsertRandomData()
-		db.InsertRandomData()
-		db.InsertRandomData()
+		db.InsertRandomData(ds)
+		db.InsertRandomData(ds)
+		db.InsertRandomData(ds)
 		db.SelectRandomData(10)
 
 		//delete Data
@@ -134,6 +131,49 @@ func dbOperation(db *utils.MySQLHelper, wg *sync.WaitGroup, runtime int) {
 		elapsed = time.Since(start).Seconds()
 	}
 
+}
+
+//BaseTestOperations struct for handling panic and test suite tear down
+type BaseLoadTestOperations struct {
+	installer *installer.InstallHelper
+	kh        *utils.K8sHelper
+	helper    *clients.TestClient
+	T         func() *testing.T
+	namespace string
+}
+
+//NewBaseTestOperations creates new instance of BaseTestOperations struct
+func NewBaseLoadTestOperations(t func() *testing.T, namespace string) (BaseLoadTestOperations, *utils.K8sHelper, *installer.InstallHelper) {
+	kh, err := utils.CreateK8sHelper(t)
+	require.NoError(t(), err)
+
+	i := installer.NewK8sRookhelper(kh.Clientset, t)
+
+	op := BaseLoadTestOperations{i, kh, nil, t, namespace}
+	op.SetUp()
+	return op, kh, i
+}
+
+//SetUpRook is a wrapper for setting up rook
+func (o BaseLoadTestOperations) SetUp() {
+
+	if !o.kh.IsRookInstalled(o.namespace) {
+		isRookInstalled, err := o.installer.InstallRookOnK8sWithHostPathAndDevices(o.namespace, "bluestore", "/temp/rookBackup", false, true, 3, true /* startWithAllNodes */)
+		require.NoError(o.T(), err)
+		require.True(o.T(), isRookInstalled)
+
+	}
+
+	// Enable chaos monkey if enable_chaos flag is present
+	if o.installer.Env.EnableChaos {
+		c := NewChaosHelper(o.namespace, o.kh)
+		go c.Monkey()
+	}
+}
+
+//TearDownRook is a wrapper for tearDown after suite
+func (o BaseLoadTestOperations) TearDown() {
+	// No Clean up for load test
 }
 
 func GetMySqlPodDef() string {

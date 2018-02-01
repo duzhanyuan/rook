@@ -18,38 +18,36 @@ limitations under the License.
 package k8sutil
 
 import (
-	"github.com/rook/rook/pkg/util/kvstore"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 )
 
 type ConfigMapKVStore struct {
 	namespace string
 	clientset kubernetes.Interface
+	ownerRef  metav1.OwnerReference
 }
 
-func NewConfigMapKVStore(namespace string, clientset kubernetes.Interface) *ConfigMapKVStore {
+func NewConfigMapKVStore(namespace string, clientset kubernetes.Interface, ownerRef metav1.OwnerReference) *ConfigMapKVStore {
 	return &ConfigMapKVStore{
 		namespace: namespace,
 		clientset: clientset,
+		ownerRef:  ownerRef,
 	}
 }
 
 func (kv *ConfigMapKVStore) GetValue(storeName, key string) (string, error) {
 	cm, err := kv.clientset.CoreV1().ConfigMaps(kv.namespace).Get(storeName, metav1.GetOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
-			return "", kvstore.NewNotExistError(storeName, key)
-		}
-
 		return "", err
 	}
 
 	val, ok := cm.Data[key]
 	if !ok {
-		return "", kvstore.NewNotExistError(storeName, key)
+		return "", errors.NewNotFound(schema.GroupResource{}, key)
 	}
 
 	return val, nil
@@ -65,8 +63,9 @@ func (kv *ConfigMapKVStore) SetValue(storeName, key, value string) error {
 		// the given config map doesn't exist yet, create it now with the given key/val
 		cm = &v1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      storeName,
-				Namespace: kv.namespace,
+				Name:            storeName,
+				Namespace:       kv.namespace,
+				OwnerReferences: []metav1.OwnerReference{kv.ownerRef},
 			},
 			Data: map[string]string{key: value},
 		}
@@ -89,10 +88,6 @@ func (kv *ConfigMapKVStore) SetValue(storeName, key, value string) error {
 func (kv *ConfigMapKVStore) GetStore(storeName string) (map[string]string, error) {
 	cm, err := kv.clientset.CoreV1().ConfigMaps(kv.namespace).Get(storeName, metav1.GetOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, kvstore.NewNotExistError(storeName, "")
-		}
-
 		return nil, err
 	}
 

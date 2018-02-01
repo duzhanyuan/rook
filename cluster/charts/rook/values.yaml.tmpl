@@ -26,3 +26,12 @@ logLevel: INFO
 ## If true, create & use RBAC resources
 ##
 rbacEnable: true
+
+## Rook Agent configuration
+## toleration: NoSchedule, PreferNoSchedule or NoExecute
+## tolerationKey: Set this to the specific key of the taint to tolerate
+## flexVolumeDirPath: The path where the Rook agent discovers the flex volume plugins
+# agent:
+#   toleration: NoSchedule
+#   tolerationKey: key
+#   flexVolumeDirPath: /usr/libexec/kubernetes/kubelet-plugins/volume/exec/

@@ -1,10 +1,10 @@
 ---
-title: Cluster CRD
-weight: 17
+title: Cluster
+weight: 32
 indent: true
 ---
 
-# Creating Rook Clusters
+# Cluster CRD
 
 Rook allows creation and customization of storage clusters through the custom resource definitions (CRDs). The following settings are
 available for a cluster.
@@ -20,8 +20,8 @@ Settings can be specified at the global level to apply to the cluster as a whole
 
 ### Cluster settings
 
-- `versionTag`: The version (tag) of the `rook/rook` container that will be deployed. Upgrades are not yet supported if this setting is updated for an existing cluster, but upgrades will be coming.
 - `dataDirHostPath`: The path on the host ([hostPath](https://kubernetes.io/docs/concepts/storage/volumes/#hostpath)) where config and data should be stored for each of the services. If the directory does not exist, it will be created. Because this directory persists on the host, it will remain after pods are deleted.
+  - On **Minikube** environments, use `/data/rook`. Minikube boots into a tmpfs but it provides some [directories](https://github.com/kubernetes/minikube/blob/master/docs/persistent_volumes.md) where files can be persisted across reboots. Using one of these directories will ensure that Rook's data and configuration files are persisted and that enough storage space is available.
   - If a path is not specified, an [empty dir](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir) will be used and the config will be lost when the pod or host is restarted. This option is **not recommended**.
   - **WARNING**: For test scenarios, if you delete a cluster and start a new cluster on the same hosts, the path used by `dataDirHostPath` must be deleted. Otherwise, stale keys and other config will remain from the previous cluster and the new mons will fail to start.
 If this value is empty, each pod will get an ephemeral directory to store their config files that is tied to the lifetime of the pod running on that node. More details can be found in the Kubernetes [empty dir docs](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir).
@@ -38,9 +38,15 @@ For more details on the mons and when to choose a number other than `3`, see the
   - [storage selection settings](#storage-selection-settings)
   - [storage configuration settings](#storage-configuration-settings)
 
+#### Node updates
+Nodes can be added and removed over time by updating the Cluster CRD, for example with `kubectl -n rook edit cluster rook`.
+This will bring up your default text editor and allow you to add and remove storage nodes from the cluster.
+This feature is only available when `useAllNodes` has been set to `false`.
+
 ### Node settings
 
-In addition to the cluster level settings specified above, each individual node can also specify configuration to override the cluster level settings and defaults.  If a node does not specify any configuration then it will inherit the cluster level settings.
+In addition to the cluster level settings specified above, each individual node can also specify configuration to override the cluster level settings and defaults.
+If a node does not specify any configuration then it will inherit the cluster level settings.
 - `name`: The name of the node, which should match its `kubernetes.io/hostname` label.
 - `devices`: A list of individual device names belonging to this node to include in the storage cluster.
   - `name`: The name of the device (e.g., `sda`).
@@ -81,6 +87,10 @@ A Placement configuration is specified (according to the kubernetes [PodSpec](ht
 - `podAntiAffinity`: kubernetes [PodAntiAffinity](https://kubernetes.io/docs/api-reference/v1.6/#podantiaffinity-v1-core)
 - `tolerations`: list of kubernetes [Toleration](https://kubernetes.io/docs/api-reference/v1.6/#toleration-v1-core)
 
+The `mon` pod does not allow `Pod` affinity or anti-affinity.
+This is because of the mons having built-in anti-affinity with each other through the operator. The operator chooses which nodes are to run a mon on. Each mon is then tied to a node with a node selector using a hostname.
+See the [mon design doc](https://github.com/rook/rook/blob/master/design/mon-health.md) for more details on the mon failover design.
+
 ### Cluster-wide Resources Configuration Settings
 
 Resources should be specified so that the rook components are handled after [Kubernetes Pod Quality of Service classes](https://kubernetes.io/docs/tasks/configure-pod-container/quality-service-pod/).
@@ -118,7 +128,6 @@ metadata:
   name: rook
   namespace: rook
 spec:
-  versionTag: master
   dataDirHostPath: /var/lib/rook
   # cluster level storage configuration and selection
   storage:
@@ -150,7 +159,6 @@ metadata:
   name: rook
   namespace: rook
 spec:
-  versionTag: master
   dataDirHostPath: /var/lib/rook
   # cluster level storage configuration and selection
   storage:
@@ -194,7 +202,6 @@ metadata:
   name: rook
   namespace: rook
 spec:
-  versionTag: master
   dataDirHostPath: /var/lib/rook
   # cluster level storage configuration and selection
   storage:
@@ -232,7 +239,6 @@ metadata:
   name: rook
   namespace: rook
 spec:
-  versionTag: master
   dataDirHostPath: /var/lib/rook
   placement:
     all:
@@ -280,7 +286,6 @@ metadata:
   name: rook
   namespace: rook
 spec:
-  versionTag: master
   dataDirHostPath: /var/lib/rook
   # cluster level resource requests/limits configuration
   resources:

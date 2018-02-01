@@ -21,8 +21,24 @@ spec:
         args:
           - operator
         env:
-        - name: ROOK_REPO_PREFIX
-          value: {{ .Values.image.prefix }}
+{{- if not .Values.rbacEnable }}
+        - name: RBAC_ENABLED
+          value: "false"
+{{- end }}
+{{- if .Values.agent }}
+{{- if .Values.agent.toleration }}
+        - name: AGENT_TOLERATION
+          value: {{ .Values.agent.toleration }}
+{{- end }}
+{{- if .Values.agent.tolerationKey }}
+        - name: AGENT_TOLERATION_KEY
+          value: {{ .Values.agent.tolerationKey }}
+{{- end }}
+{{- if .Values.agent.flexVolumeDirPath }}
+        - name: FLEXVOLUME_DIR_PATH
+          value: {{ .Values.agent.flexVolumeDirPath }}
+{{- end }}
+{{- end }}
         - name: ROOK_LOG_LEVEL
           value: {{ .Values.logLevel }}
         - name: NODE_NAME
@@ -37,7 +53,6 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-
 {{- if .Values.mon }}
 {{- if .Values.mon.healthCheckInterval }}
         - name: ROOK_MON_HEALTHCHECK_INTERVAL

@@ -12,9 +12,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
-Some of the code below came from https://github.com/coreos/etcd-operator
-which also has the apache 2.0 license.
 */
 
 // Package k8sutil for Kubernetes helpers.
@@ -22,6 +19,7 @@ package k8sutil
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/coreos/pkg/capnslog"
 	"k8s.io/client-go/kubernetes"
@@ -31,21 +29,8 @@ import (
 var logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-k8sutil")
 
 const (
-	// V1Alpha1 version for kubernetes resources
-	V1Alpha1 = "v1alpha1"
-
-	// V1Beta1 version for kubernetes resources
-	V1Beta1 = "v1beta1"
-
-	// V1 version for kubernetes resources
-	V1 = "v1"
-)
-
-const (
 	// Namespace for rook
 	Namespace = "rook"
-	// CustomResourceGroup for rook CRD
-	CustomResourceGroup = "rook.io"
 	// DefaultNamespace for the cluster
 	DefaultNamespace = "default"
 	// DataDirVolume data dir volume
@@ -60,6 +45,8 @@ const (
 	PodNamespaceEnvVar = "POD_NAMESPACE"
 	// NodeNameEnvVar is the env variable for getting the node via downward api
 	NodeNameEnvVar = "NODE_NAME"
+	// FirstCRDVersion is the first K8s version with CRDs to replace TPRs
+	FirstCRDVersion = "v1.7.0"
 )
 
 // GetK8SVersion gets the version of the running K8S cluster
@@ -67,6 +54,14 @@ func GetK8SVersion(clientset kubernetes.Interface) (*version.Version, error) {
 	serverVersion, err := clientset.Discovery().ServerVersion()
 	if err != nil {
 		return nil, fmt.Errorf("Error getting server version: %v", err)
+	}
+
+	// make sure the kubernetes version is parseable
+	index := strings.Index(serverVersion.GitVersion, "+")
+	if index != -1 {
+		newVersion := serverVersion.GitVersion[:index]
+		logger.Infof("returning version %s instead of %s", newVersion, serverVersion.GitVersion)
+		serverVersion.GitVersion = newVersion
 	}
 	return version.MustParseSemantic(serverVersion.GitVersion), nil
 }

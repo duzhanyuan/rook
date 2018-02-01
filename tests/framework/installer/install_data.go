@@ -155,8 +155,6 @@ spec:
         image: rook/rook:master
         args: ["operator", "--mon-healthcheck-interval=5s", "--mon-out-timeout=1s"]
         env:
-        - name: ROOK_REPO_PREFIX
-          value: rook
         - name: ROOK_LOG_LEVEL
           value: INFO
         # The interval to check if every mon is in the quorum.
@@ -182,18 +180,12 @@ spec:
 
 //GetRookCluster returns rook-cluster manifest
 func (i *InstallData) GetRookCluster(namespace, storeType, dataDirHostPath string, useAllDevices bool, mons int) string {
-	return `apiVersion: v1
-kind: Namespace
-metadata:
-  name: ` + namespace + `
----
-apiVersion: rook.io/v1alpha1
+	return `apiVersion: rook.io/v1alpha1
 kind: Cluster
 metadata:
   name: ` + namespace + `
   namespace: ` + namespace + `
 spec:
-  versionTag: master
   dataDirHostPath: ` + dataDirHostPath + `
   hostNetwork: false
   monCount: ` + strconv.Itoa(mons) + `

@@ -1,10 +1,9 @@
 ---
-title: Upgrading Rook
-weight: 25
-indent: true
+title: Upgrades
+weight: 60
 ---
 
-# Upgrading the Rook Software
+# Upgrades
 This guide will walk you through the manual steps to upgrade the software in a Rook cluster from one version to the next.
 Rook is a distributed software system and therefore there are multiple components to individually upgrade in the sequence defined in this guide.
 After each component is upgraded, it is important to verify that the cluster returns to a healthy and fully functional state.
@@ -43,7 +42,6 @@ metadata:
   name: rook
   namespace: rook
 spec:
-  versionTag: v0.5.0
   dataDirHostPath: /var/lib/rook
   storage:
     useAllNodes: true
@@ -131,16 +129,6 @@ The general flow of the upgrade process will be to upgrade the version of a Rook
 
 In this guide, we will be upgrading a live Rook cluster running `v0.5.0` to the next available version of `v0.5.1`.
 Let's get started!
-
-### Cluster Version Tag
-The first step in the upgrade process is to update the Cluster spec's `versionTag` field.
-This value is used as the version for any other Rook components that the operator may bring up later on in the cluster's lifecycle.
-We can begin editing it with the following `kubectl` command:
-```bash
-kubectl -n rook edit cluster.rook.io rook
-```
-This will bring up your default text editor with the cluster spec loaded and ready for editing.
-In your editor, simply update `versionTag: v0.5.0` to now be `versionTag: v0.5.1`, then save and quit your editor.
 
 ### Operator
 The Rook operator is the management brains of the cluster, so it should be upgraded first before other components.
@@ -287,7 +275,7 @@ kubectl -n rook get pod -l app=rook-ceph-mgr -o jsonpath='{range .items[*]}{.met
 ```
 
 ### Optional Components
-If you have optionally installed either [object storage](./k8s-object.md) or a [shared file system](./k8s-filesystem.md) in your Rook cluster, the sections below will provide guidance on how to update them as well.
+If you have optionally installed either [object storage](./object.md) or a [shared file system](./filesystem.md) in your Rook cluster, the sections below will provide guidance on how to update them as well.
 They are both managed by deployments, which we have already covered in this guide, so the instructions will be brief.
 
 #### Object Storage (RGW)

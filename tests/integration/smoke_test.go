@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/pkg/util/version"
 )
 
 // ************************************************
@@ -59,7 +60,7 @@ import (
 func TestSmokeSuite(t *testing.T) {
 	s := new(SmokeSuite)
 	defer func(s *SmokeSuite) {
-		HandlePanics(recover(), s.o, s.T)
+		HandlePanics(recover(), s.op, s.T)
 	}(s)
 	suite.Run(t, s)
 }
@@ -67,42 +68,19 @@ func TestSmokeSuite(t *testing.T) {
 type SmokeSuite struct {
 	suite.Suite
 	helper    *clients.TestClient
+	op        contracts.Setup
 	k8sh      *utils.K8sHelper
-	installer *installer.InstallHelper
-	o         contracts.TestOperator
 	namespace string
 }
 
 func (suite *SmokeSuite) SetupSuite() {
 	suite.namespace = "smoke-ns"
-	kh, err := utils.CreateK8sHelper(suite.T)
-	require.NoError(suite.T(), err)
-
-	suite.k8sh = kh
-
-	suite.installer = installer.NewK8sRookhelper(kh.Clientset, suite.T)
-	suite.o = NewBaseTestOperations(suite.installer, suite.T, suite.namespace, false)
-
-	isRookInstalled, err := suite.installer.InstallRookOnK8sWithHostPathAndDevices(suite.namespace, "bluestore", "", true, 3)
-	assert.NoError(suite.T(), err)
-	if !isRookInstalled {
-		logger.Errorf("Rook Was not installed successfully")
-		suite.T().Fail()
-		suite.TearDownSuite()
-		suite.T().FailNow()
-	}
-
-	suite.helper, err = clients.CreateTestClient(kh, suite.namespace)
-	if err != nil {
-		logger.Errorf("Cannot create rook test client, er -> %v", err)
-		suite.T().Fail()
-		suite.TearDownSuite()
-		suite.T().FailNow()
-	}
+	suite.op, suite.k8sh = NewBaseTestOperations(suite.T, suite.namespace, "bluestore", "", false, false, 3)
+	suite.helper = GetTestClient(suite.k8sh, suite.namespace, suite.op, suite.T)
 }
 
 func (suite *SmokeSuite) TearDownSuite() {
-	suite.o.TearDown()
+	suite.op.TearDown()
 }
 
 func (suite *SmokeSuite) TestBlockStorage_SmokeTest() {
@@ -121,16 +99,20 @@ func (suite *SmokeSuite) TestRookClusterInstallation_smokeTest() {
 }
 
 func (suite *SmokeSuite) TestOperatorGetFlexvolumePath() {
+	v := version.MustParseSemantic(suite.k8sh.GetK8sServerVersion())
+	if !v.LessThan(version.MustParseSemantic("1.9.0")) {
+		suite.T().Skip("Skipping test - known issues with k8s 1.9 (https://github.com/rook/rook/issues/1330)")
+	}
 	// get the operator pod
 	sysNamespace := installer.SystemNamespace(suite.namespace)
 	listOpts := metav1.ListOptions{LabelSelector: "app=rook-operator"}
-	podList, err := suite.k8sh.Clientset.Pods(sysNamespace).List(listOpts)
+	podList, err := suite.k8sh.Clientset.Core().Pods(sysNamespace).List(listOpts)
 	require.Nil(suite.T(), err)
 	require.Equal(suite.T(), 1, len(podList.Items))
 
 	// get the raw log for the operator pod
 	opPodName := podList.Items[0].Name
-	rawLog, err := suite.k8sh.Clientset.Pods(sysNamespace).GetLogs(opPodName, &v1.PodLogOptions{}).Do().Raw()
+	rawLog, err := suite.k8sh.Clientset.Core().Pods(sysNamespace).GetLogs(opPodName, &v1.PodLogOptions{}).Do().Raw()
 	require.Nil(suite.T(), err)
 
 	r := regexp.MustCompile(`discovered flexvolume dir path from source.*\n`)

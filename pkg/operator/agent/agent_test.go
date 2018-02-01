@@ -12,9 +12,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
-Some of the code below came from https://github.com/coreos/etcd-operator
-which also has the apache 2.0 license.
 */
 
 // Package agent to manage Kubernetes storage attach events.
@@ -61,7 +58,7 @@ func TestStartAgentDaemonset(t *testing.T) {
 	a := New(clientset)
 
 	// start a basic cluster
-	err := a.Start(namespace)
+	err := a.Start(namespace, "rook/rook:myversion")
 	assert.Nil(t, err)
 
 	// check clusters rbac roles
@@ -90,7 +87,8 @@ func TestStartAgentDaemonset(t *testing.T) {
 	envs := agentDS.Spec.Template.Spec.Containers[0].Env
 	assert.Equal(t, 2, len(envs))
 	image := agentDS.Spec.Template.Spec.Containers[0].Image
-	assert.Equal(t, "rook/test", image)
+	assert.Equal(t, "rook/rook:myversion", image)
+	assert.Nil(t, agentDS.Spec.Template.Spec.Tolerations)
 }
 
 func TestGetContainerImage(t *testing.T) {
@@ -119,7 +117,7 @@ func TestGetContainerImage(t *testing.T) {
 	clientset.CoreV1().Pods("Default").Create(&pod)
 
 	// start a basic cluster
-	image, err := getContainerImage(clientset)
+	image, err := k8sutil.GetContainerImage(clientset)
 	assert.Nil(t, err)
 	assert.Equal(t, "rook/test", image)
 }
@@ -154,7 +152,54 @@ func TestGetContainerImageMultipleContainers(t *testing.T) {
 	clientset.CoreV1().Pods("Default").Create(&pod)
 
 	// start a basic cluster
-	_, err := getContainerImage(clientset)
+	_, err := k8sutil.GetContainerImage(clientset)
 	assert.NotNil(t, err)
 	assert.Equal(t, "failed to get container image. There should only be exactly one container in this pod", err.Error())
+}
+
+func TestStartAgentDaemonsetWithToleration(t *testing.T) {
+	clientset := test.New(3)
+
+	os.Setenv(k8sutil.PodNamespaceEnvVar, "rook-system")
+	defer os.Unsetenv(k8sutil.PodNamespaceEnvVar)
+
+	os.Setenv(k8sutil.PodNameEnvVar, "rook-operator")
+	defer os.Unsetenv(k8sutil.PodNameEnvVar)
+
+	os.Setenv(agentDaemonsetTolerationEnv, "NoSchedule")
+	defer os.Unsetenv(agentDaemonsetTolerationEnv)
+
+	os.Setenv(agentDaemonsetTolerationKeyEnv, "example")
+	defer os.Unsetenv(agentDaemonsetTolerationKeyEnv)
+
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rook-operator",
+			Namespace: "rook-system",
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:  "mypodContainer",
+					Image: "rook/test",
+				},
+			},
+		},
+	}
+	clientset.CoreV1().Pods("rook-system").Create(&pod)
+
+	namespace := "ns"
+	a := New(clientset)
+
+	// start a basic cluster
+	err := a.Start(namespace, "rook/test")
+	assert.Nil(t, err)
+
+	// check daemonset toleration
+	agentDS, err := clientset.Extensions().DaemonSets(namespace).Get("rook-agent", metav1.GetOptions{})
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(agentDS.Spec.Template.Spec.Tolerations))
+	assert.Equal(t, "NoSchedule", string(agentDS.Spec.Template.Spec.Tolerations[0].Effect))
+	assert.Equal(t, "example", string(agentDS.Spec.Template.Spec.Tolerations[0].Key))
+	assert.Equal(t, "Exists", string(agentDS.Spec.Template.Spec.Tolerations[0].Operator))
 }
